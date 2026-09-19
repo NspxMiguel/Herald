@@ -1,0 +1,13 @@
+node_modules/
+dist/
+.env
+.env.local
+.wwebjs_auth/
+.wwebjs_cache/
+
+# Notas nossas: ficam na máquina, não no GitHub.
+PEDIDOS.md
+CONTRATO.md
+IDEIAS.md
+DESIGN.md
+TRABALHO.md

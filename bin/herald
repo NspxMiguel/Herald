@@ -1,0 +1,382 @@
+#!/usr/bin/env node
+'use strict';
+
+// Herald's only face. The daemon holds the WhatsApp session; this finds it (a
+// 0600 file it writes on start), starts it when it is not up, and knocks.
+//
+// Two audiences share these commands. The agent uses send / inbox / thread /
+// status and never needs a screen. Miguel uses login once, and approve when a
+// contact is set to ask.
+
+const fs = require('node:fs');
+const path = require('node:path');
+const { spawn } = require('node:child_process');
+const QRCode = require('qrcode');
+const { home, readJson } = require('../src/core/paths.cjs');
+
+const DAEMON = path.join(__dirname, '..', 'src', 'daemon.cjs');
+
+function die(message, code = 1) {
+  console.error(message);
+  process.exit(code);
+}
+
+function door() {
+  return readJson(path.join(home(), 'bridge.json'));
+}
+
+function sleep(ms) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function alive() {
+  const found = door();
+  if (!found) return null;
+  try {
+    const response = await fetch(`http://127.0.0.1:${found.port}/status`, {
+      headers: { authorization: `Bearer ${found.token}` },
+      signal: AbortSignal.timeout(2000)
+    });
+    return response.ok ? found : null;
+  } catch {
+    return null;
+  }
+}
+
+// Nothing about Herald should require remembering to start something first, so
+// any command that needs the daemon starts it. Detached, because the CLI exits
+// long before the WhatsApp session should.
+async function ensureDaemon() {
+  if (await alive()) return;
+  fs.mkdirSync(home(), { recursive: true });
+  const log = fs.openSync(path.join(home(), 'daemon.log'), 'a');
+  spawn(process.execPath, [DAEMON], {
+    detached: true,
+    stdio: ['ignore', log, log]
+  }).unref();
+
+  for (let attempt = 0; attempt < 40; attempt += 1) {
+    await sleep(250);
+    if (await alive()) return;
+  }
+  die(`Herald's daemon did not come up. Look at ${path.join(home(), 'daemon.log')}`);
+}
+
+async function call(method, route, payload) {
+  await ensureDaemon();
+  const { port, token } = door() || {};
+  const url = new URL(`http://127.0.0.1:${port}${route}`);
+  if (method === 'GET' && payload) {
+    for (const [key, value] of Object.entries(payload)) {
+      if (value !== undefined && value !== null && value !== '') url.searchParams.set(key, value);
+    }
+  }
+  let response;
+  try {
+    response = await fetch(url, {
+      method,
+      headers: {
+        authorization: `Bearer ${token}`,
+        ...(method === 'POST' ? { 'content-type': 'application/json' } : {})
+      },
+      body: method === 'POST' ? JSON.stringify(payload || {}) : undefined
+    });
+  } catch (error) {
+    die(`Herald is not answering on port ${port}: ${error.message}`);
+  }
+  const body = await response.json().catch(() => ({}));
+  if (!response.ok) die(explain(body, response.status), 2);
+  return body;
+}
+
+// Codes come off the wire as machine names; this is where they become something
+// worth reading, with the fix attached.
+function explain(body, status) {
+  const messages = {
+    bad_token: 'The token does not match. Run: herald restart',
+    not_connected:
+      'WhatsApp is not linked yet.\nRun: herald login  — it draws a QR code here for you to scan.',
+    not_listed: `"${body.query || 'that person'}" is not on the list.\nRun: herald allow "${body.query || 'Name'}"`,
+    ambiguous: `More than one contact matches: ${(body.matches || []).join(', ')}. Use the full name.`,
+    group: 'Herald never writes to groups.',
+    muted: 'That contact is switched off. Run: herald allow "name" --ask',
+    empty_message: 'There is no text to send.',
+    bad_number: 'That does not look like a phone number.',
+    too_long: `The message is longer than ${body.limit} characters.`,
+    rate_limited: `Too many messages to that person in the last hour. Try again in ${Math.ceil((body.retryAfterMs || 0) / 60000)} min.`,
+    unknown_request: 'No request is waiting with that id. Run: herald pending',
+    no_target: 'Say who it goes to: herald send "Name" "message"'
+  };
+  return messages[body.error] || `Herald refused (${status}): ${body.message || body.error}`;
+}
+
+function flags(argv) {
+  const out = { _: [] };
+  for (let index = 0; index < argv.length; index += 1) {
+    const token = argv[index];
+    if (token.startsWith('--')) {
+      const [name, inline] = token.slice(2).split('=');
+      if (inline !== undefined) out[name] = inline;
+      else if (argv[index + 1] && !argv[index + 1].startsWith('--')) out[name] = argv[++index];
+      else out[name] = true;
+    } else {
+      out._.push(token);
+    }
+  }
+  return out;
+}
+
+const when = (at) => new Date(at).toLocaleString();
+
+const usage = `herald — send WhatsApp messages through Miguel's account, within his rules
+
+  For Miguel
+    herald login                       link WhatsApp: draws the QR code here
+    herald allow NAME [--auto|--ask]   let the agent write to somebody
+    herald deny NAME                   take them off the list
+    herald pending                     what the agent wants to send
+    herald approve ID | reject ID      decide it
+    herald log                         everything Herald has done
+    herald logout                      unlink, and stop
+
+  For the agent
+    herald send NAME "message"         send, or queue when the contact is 'ask'
+         [--wait] [--note "why"]
+    herald inbox [--unread] [--read]   replies from people on the list
+    herald thread NAME [--limit 30]    the conversation, agent lines marked
+    herald contacts                    who is reachable, and how
+    herald status                      is it linked, is anything waiting
+
+Modes: 'auto' goes out immediately, 'ask' waits for Miguel to approve. A contact
+added without a flag is 'ask'. Groups are never a destination, and every message
+the agent sends carries an invisible marker so his own writing stays his.`;
+
+/* ------------------------------------------------------------------ commands */
+
+async function login() {
+  await ensureDaemon();
+  await call('POST', '/login', {});
+
+  let drawn = null;
+  const deadline = Date.now() + 180 * 1000;
+  process.stdout.write('herald: asking WhatsApp for a code…\n');
+
+  while (Date.now() < deadline) {
+    const { connection, qr } = await call('GET', '/qr');
+
+    if (connection === 'ready') {
+      console.log('\nherald: linked. You do not have to do this again.');
+      const { contacts } = await call('GET', '/contacts');
+      if (!contacts.length) {
+        console.log('Nobody is on the list yet — nothing can be sent.');
+        console.log('Add someone with: herald allow "Pai" --auto');
+      }
+      return;
+    }
+    if (connection === 'error') return die('WhatsApp refused the session. Try herald login again.');
+
+    if (qr && qr !== drawn) {
+      drawn = qr;
+      // The one screen this app uses: his terminal. Small form, because the
+      // full-size block does not fit an 80-column window.
+      const art = await QRCode.toString(qr, { type: 'terminal', small: true });
+      console.log(`\n${art}`);
+      console.log('WhatsApp → Settings → Linked devices → Link a device, and scan this.');
+      console.log('The code refreshes on its own; a new one will appear here.\n');
+    }
+    await sleep(1500);
+  }
+  die('Nobody scanned it. Run herald login again when you are ready.', 4);
+}
+
+async function send(options) {
+  const to = options.to || options._[0];
+  const text = options.text || options._[1];
+  if (!to || !text) die('Usage: herald send "Name" "message"');
+
+  const result = await call('POST', '/send', { to, text, note: options.note });
+  if (result.status === 'sent') return console.log(`sent to ${result.to}`);
+
+  console.log(`waiting for Miguel to approve (${result.to}) — id ${result.id}`);
+  if (!options.wait) return;
+
+  // Polling rather than a held connection: he may take an hour, and the agent's
+  // shell should not be the thing holding the request alive.
+  const deadline = Date.now() + Number(options.timeout || 600) * 1000;
+  while (Date.now() < deadline) {
+    await sleep(3000);
+    const check = await call('GET', '/request', { id: result.id });
+    if (check.status === 'pending') continue;
+    console.log(check.status === 'rejected' ? 'he rejected it' : `sent to ${result.to}`);
+    process.exit(check.status === 'rejected' ? 3 : 0);
+  }
+  die('Still waiting after the timeout. It stays in his queue.', 4);
+}
+
+async function allow(options) {
+  const name = options._[0];
+  if (!name) die('Usage: herald allow "Name" [--auto|--ask]');
+  const mode = options.auto ? 'auto' : options.off ? 'off' : 'ask';
+
+  // A bare number can be added without the phone book; a name has to be found
+  // in it, so that a typo becomes an error instead of a stranger.
+  const digits = name.replace(/\D/g, '');
+  if (digits.length >= 10 && !/[a-z]/i.test(name)) {
+    const added = await call('POST', '/contacts/add', {
+      name: options.name || digits,
+      phone: digits,
+      mode,
+      note: options.note
+    });
+    return console.log(`${added.contact.name} — ${added.contact.mode}`);
+  }
+
+  const { contacts } = await call('GET', '/phonebook', { query: name });
+  if (!contacts.length) die(`Nobody in your WhatsApp contacts matches "${name}".`);
+  if (contacts.length > 1 && !options.pick) {
+    console.log('More than one match — repeat with the full name, or --pick N:');
+    contacts.slice(0, 10).forEach((contact, index) => {
+      console.log(`  ${index + 1}. ${contact.name}  +${contact.phone}`);
+    });
+    return;
+  }
+  const chosen = contacts[options.pick ? Number(options.pick) - 1 : 0];
+  if (!chosen) die('That number is not on the list shown.');
+  const added = await call('POST', '/contacts/add', { ...chosen, mode, note: options.note });
+  console.log(`${added.contact.name} — ${added.contact.mode}`);
+}
+
+async function main() {
+  const argv = process.argv.slice(2);
+  const command = argv[0];
+  const options = flags(argv.slice(1));
+  if (!command || command === 'help' || options.help) return console.log(usage);
+
+  switch (command) {
+    case 'login':
+      return login();
+
+    case 'logout': {
+      await call('POST', '/logout', {});
+      return console.log('herald: unlinked.');
+    }
+
+    case 'status': {
+      const status = await call('GET', '/status');
+      const words = {
+        ready: 'linked',
+        connecting: 'starting the browser…',
+        authenticating: 'linking…',
+        scan_qr: 'waiting for a scan — run: herald login',
+        disconnected: 'not linked — run: herald login',
+        error: 'broken'
+      };
+      console.log(
+        `whatsapp : ${words[status.connection] || status.connection}\n` +
+          `contacts : ${status.contacts}\n` +
+          `pending  : ${status.pending}\n` +
+          `unread   : ${status.unread}\n` +
+          `uptime   : ${status.uptimeSeconds}s` +
+          (status.error ? `\nerror    : ${status.error}` : '')
+      );
+      return;
+    }
+
+    case 'send':
+      return send(options);
+
+    case 'allow':
+      return allow(options);
+
+    case 'deny': {
+      const result = await call('POST', '/contacts/remove', { name: options._[0] });
+      return console.log(`${result.removed} can no longer be written to.`);
+    }
+
+    case 'contacts': {
+      const { contacts } = await call('GET', '/contacts');
+      if (!contacts.length) return console.log('Nobody on the list. Run: herald allow "Name"');
+      for (const contact of contacts) {
+        console.log(
+          `${contact.mode.padEnd(5)} ${contact.name}  ${contact.phone}${contact.note ? `  — ${contact.note}` : ''}`
+        );
+      }
+      return;
+    }
+
+    case 'pending': {
+      const { pending } = await call('GET', '/pending');
+      if (!pending.length) return console.log('nothing waiting');
+      for (const item of pending) {
+        console.log(`${item.id}  → ${item.to}${item.note ? `  (${item.note})` : ''}`);
+        console.log(`  ${item.text}`);
+        console.log(`  herald approve ${item.id}   herald reject ${item.id}\n`);
+      }
+      return;
+    }
+
+    case 'approve':
+    case 'reject': {
+      const id = options._[0];
+      if (!id) die(`Usage: herald ${command} ID   (herald pending shows them)`);
+      const result = await call('POST', '/pending/decide', { id, action: command });
+      return console.log(
+        result.status === 'sent' ? `sent to ${result.to}` : `discarded (${result.to})`
+      );
+    }
+
+    case 'inbox': {
+      const { messages } = await call('GET', '/inbox', { unread: options.unread ? 'true' : '' });
+      if (!messages.length) return console.log('nothing new');
+      for (const message of messages.slice().reverse()) {
+        console.log(`[${when(message.at)}] ${message.from}: ${message.text || '(media)'}`);
+      }
+      if (options.read) await call('POST', '/inbox/read', {});
+      return;
+    }
+
+    case 'thread': {
+      const to = options.to || options._[0];
+      if (!to) die('Usage: herald thread "Name"');
+      const result = await call('GET', '/thread', { to, limit: options.limit });
+      for (const message of result.messages) {
+        const who = message.from === 'me' ? (message.byAgent ? 'me (agent)' : 'me') : message.from;
+        console.log(`[${when(message.at)}] ${who}: ${message.text || '(media)'}`);
+      }
+      return;
+    }
+
+    case 'log': {
+      const { entries } = await call('GET', '/journal', { limit: options.limit });
+      if (!entries.length) return console.log('nothing yet');
+      for (const entry of entries.slice().reverse()) {
+        console.log(
+          `[${when(entry.at)}] ${entry.kind.padEnd(8)} ${entry.name || '—'}  ${(entry.text || entry.reason || '').slice(0, 80)}`
+        );
+      }
+      return;
+    }
+
+    case 'start':
+      await ensureDaemon();
+      return console.log('herald: running');
+
+    case 'stop': {
+      if (!(await alive())) return console.log('herald: not running');
+      await call('POST', '/stop', {});
+      return console.log('herald: stopped');
+    }
+
+    case 'restart': {
+      if (await alive()) await call('POST', '/stop', {}).catch(() => {});
+      await sleep(600);
+      await ensureDaemon();
+      return console.log('herald: running');
+    }
+
+    default:
+      die(`Unknown command: ${command}\n\n${usage}`);
+  }
+}
+
+main().catch((error) => die(error.message));

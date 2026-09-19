@@ -1,0 +1,627 @@
+'use strict';
+
+// The process that holds the WhatsApp session. It is the only long-lived piece
+// of Herald: everything else — the CLI, the MCP server — is a thin client that
+// talks to it over a loopback socket, because WhatsApp Web allows exactly one
+// linked browser and it has to stay open between messages.
+//
+// It has no window and never asks for anything. The single moment a human is
+// needed is the QR code, and even that is drawn in his terminal by `herald
+// login`, which reads it from here.
+
+const fs = require('node:fs');
+const path = require('node:path');
+const os = require('node:os');
+const crypto = require('node:crypto');
+const { execFile } = require('node:child_process');
+const { Client, LocalAuth } = require('whatsapp-web.js');
+
+const signature = require('./core/signature.cjs');
+const contactId = require('./core/contact-id.cjs');
+const rules = require('./core/rules.cjs');
+const { createBridge, newToken, DEFAULT_PORT } = require('./core/bridge.cjs');
+const { home, readJson, writeJson } = require('./core/paths.cjs');
+
+const JOURNAL_LIMIT = 300;
+const INBOX_LIMIT = 200;
+
+const defaults = {
+  contacts: [],
+  port: DEFAULT_PORT,
+  token: '',
+  notify: true
+};
+
+let settings = { ...defaults };
+let client = null;
+const sendLog = Object.create(null);
+
+const state = {
+  connection: 'disconnected',
+  qr: null,
+  error: null,
+  startedAt: Date.now(),
+  pending: [],
+  journal: [],
+  inbox: []
+};
+
+/* ----------------------------------------------------------------- settings */
+
+function settingsPath() {
+  return path.join(home(), 'settings.json');
+}
+
+function load() {
+  const saved = readJson(settingsPath()) || {};
+  settings = {
+    ...defaults,
+    ...saved,
+    contacts: (saved.contacts || []).map((contact) => ({
+      ...contact,
+      mode: rules.normalizeMode(contact.mode)
+    }))
+  };
+  if (!settings.token) {
+    settings.token = newToken();
+    save();
+  }
+}
+
+// The file holds the bridge token, so it is 0600 and lives nowhere else.
+function save() {
+  writeJson(settingsPath(), settings);
+}
+
+/* ------------------------------------------------------------------ journal */
+
+function record(entry) {
+  state.journal.unshift({ id: crypto.randomUUID(), at: Date.now(), ...entry });
+  state.journal = state.journal.slice(0, JOURNAL_LIMIT);
+}
+
+// Without a window, this is the only way he learns something is waiting. Fire
+// and forget: a missing notification must never hold up a message.
+function notify(title, body) {
+  if (!settings.notify || process.platform !== 'darwin') return;
+  const escape = (text) => String(text).replace(/["\\]/g, '\\$&').slice(0, 200);
+  execFile(
+    'osascript',
+    ['-e', `display notification "${escape(body)}" with title "${escape(title)}"`],
+    () => {}
+  );
+}
+
+/* ----------------------------------------------------------------- whatsapp */
+
+function chromeExecutable() {
+  if (process.env.HERALD_CHROME_PATH) return process.env.HERALD_CHROME_PATH;
+  const candidates =
+    process.platform === 'darwin'
+      ? [
+          '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+          '/Applications/Chromium.app/Contents/MacOS/Chromium',
+          '/Applications/Brave Browser.app/Contents/MacOS/Brave Browser'
+        ]
+      : [
+          '/usr/bin/google-chrome',
+          '/usr/bin/google-chrome-stable',
+          '/usr/bin/chromium',
+          '/usr/bin/chromium-browser',
+          '/snap/bin/chromium'
+        ];
+  const found = candidates.find((candidate) => fs.existsSync(candidate));
+  if (!found) {
+    // Herald deliberately does not ship a browser: WhatsApp Web runs in the one
+    // already installed. Saying so beats puppeteer's own error, which blames a
+    // missing download nobody asked for.
+    throw new Error(
+      'No Chrome found. Install Google Chrome (or Chromium), or point HERALD_CHROME_PATH at one.'
+    );
+  }
+  return found;
+}
+
+// WhatsApp migrated accounts to LID addressing: the phone book still reports
+// 554792078506@c.us while the account's sendable id is now something like
+// 220301992398854@lid. Sending to the phone-shaped id reaches nobody, so the id
+// is resolved once per contact and kept.
+async function resolveChatId(contact) {
+  if (contact.waId && contact.waId.includes('@')) return contact.waId;
+  const numberId = await client.getNumberId(contactId.userPartOf(contact.phone));
+  if (!numberId?._serialized) {
+    throw new Error(`${contact.name} does not look like a WhatsApp account.`);
+  }
+  const stored = settings.contacts.find((candidate) => candidate.id === contact.id);
+  if (stored) {
+    stored.waId = numberId._serialized;
+    save();
+  }
+  return numberId._serialized;
+}
+
+async function resolveMissingContactIds() {
+  const missing = settings.contacts.filter((contact) => !contact.waId);
+  if (!missing.length) return;
+  let resolved = 0;
+  for (const contact of missing) {
+    try {
+      const numberId = await client.getNumberId(contactId.userPartOf(contact.phone));
+      if (numberId?._serialized) {
+        contact.waId = numberId._serialized;
+        resolved += 1;
+      }
+    } catch (error) {
+      console.warn(`Could not resolve ${contact.name}: ${error.message}`);
+    }
+  }
+  if (resolved) save();
+}
+
+// whatsapp-web.js can resolve sendMessage with an empty result when WhatsApp Web
+// moves under it: no error, no message, and the daemon would happily report a
+// send that never happened. Nothing counts as sent without an id back.
+async function sendAndConfirm(chatId, text) {
+  const sent = await client.sendMessage(chatId, text);
+  if (!sent?.id?._serialized) {
+    throw new Error(
+      'WhatsApp accepted nothing back: the message was not sent. This build of WhatsApp Web is ahead of the library.'
+    );
+  }
+  return sent;
+}
+
+async function deliver(contact, text) {
+  const chatId = await resolveChatId(contact);
+  const sent = await sendAndConfirm(chatId, signature.sign(text));
+  const key = contactId.userPartOf(contact.phone || contact.waId);
+  sendLog[key] = [...(sendLog[key] || []), Date.now()].filter(
+    (time) => Date.now() - time < rules.RATE_WINDOW_MS
+  );
+  return sent;
+}
+
+function phoneBook() {
+  return client.getContacts().then((contacts) => {
+    const unique = new Map();
+    for (const contact of contacts) {
+      if (!contact.isMyContact || contact.isMe || contact.isGroup || contact.isBlocked) continue;
+      if (!contactId.isPersonId(contact.id?._serialized)) continue;
+      const phone = contactId.userPartOf(contact.number || contact.id?.user);
+      const name = String(contact.name || contact.pushname || '').trim();
+      // Service accounts, short codes and broadcast ids are not people.
+      if (!name || phone.length < 8 || phone.length > 15) continue;
+      const key = contactId.looseKey(phone) || phone;
+      if (unique.has(key)) continue;
+      unique.set(key, { waId: contact.id._serialized, phone, name });
+    }
+    return [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
+  });
+}
+
+/* ------------------------------------------------------------------ sending */
+
+async function requestSend({ to, text, note, origin = 'agent' }) {
+  const decision = rules.decideSend({
+    contacts: settings.contacts,
+    target: to,
+    text,
+    log: sendLog
+  });
+
+  if (!decision.allowed) {
+    record({ kind: 'refused', name: String(to ?? ''), reason: decision.reason, text });
+    return {
+      status: decision.reason === 'rate_limited' ? 429 : 400,
+      body: {
+        error: decision.reason,
+        query: String(to ?? ''),
+        matches: decision.matches,
+        limit: decision.limit,
+        retryAfterMs: decision.retryAfterMs
+      }
+    };
+  }
+
+  const contact = decision.contact;
+  const body = String(text).trim();
+
+  if (decision.delivery === 'sent') {
+    const sent = await deliver(contact, body);
+    record({
+      kind: 'sent',
+      contactId: contact.id,
+      name: contact.name,
+      text: body,
+      waMessageId: sent.id._serialized
+    });
+    return { body: { status: 'sent', to: contact.name } };
+  }
+
+  const item = {
+    id: crypto.randomUUID().slice(0, 8),
+    at: Date.now(),
+    contactId: contact.id,
+    name: contact.name,
+    text: body,
+    note: String(note ?? '').trim(),
+    origin
+  };
+  state.pending.unshift(item);
+  record({ kind: 'queued', contactId: contact.id, name: contact.name, text: body });
+  notify(`Herald → ${contact.name}`, `${body.slice(0, 120)}\nherald approve ${item.id}`);
+  return { body: { status: 'pending', id: item.id, to: contact.name } };
+}
+
+async function decidePending({ id, action }) {
+  const item = state.pending.find((candidate) => candidate.id === id);
+  if (!item) return { status: 404, body: { error: 'unknown_request' } };
+  state.pending = state.pending.filter((candidate) => candidate.id !== id);
+
+  if (action !== 'approve') {
+    record({ kind: 'rejected', contactId: item.contactId, name: item.name, text: item.text });
+    return { body: { status: 'rejected', id, to: item.name } };
+  }
+
+  const contact = settings.contacts.find((candidate) => candidate.id === item.contactId);
+  if (!contact) return { status: 404, body: { error: 'not_listed' } };
+  const sent = await deliver(contact, item.text);
+  record({
+    kind: 'sent',
+    contactId: contact.id,
+    name: contact.name,
+    text: item.text,
+    approved: true,
+    waMessageId: sent.id._serialized
+  });
+  return { body: { status: 'sent', id, to: contact.name } };
+}
+
+/* ---------------------------------------------------------------- receiving */
+
+// Herald reads exactly as much of his WhatsApp as it writes to: the people on
+// the list, and nobody else. Anyone else is dropped here, before being stored,
+// counted or shown — his conversations are not the agent's to see.
+function handleIncoming(message) {
+  if (message.fromMe) return;
+  if (!contactId.isPersonId(message.from || '')) return;
+  const contact = contactId.findContact(settings.contacts, message.from);
+  if (!contact) return;
+  if (rules.normalizeMode(contact.mode) === 'off') return;
+
+  const entry = {
+    id: message.id?._serialized || crypto.randomUUID(),
+    at: (message.timestamp || Math.floor(Date.now() / 1000)) * 1000,
+    name: contact.name,
+    text: signature.strip(message.body || ''),
+    hasMedia: Boolean(message.hasMedia),
+    read: false
+  };
+  state.inbox = [entry, ...state.inbox.filter((item) => item.id !== entry.id)].slice(
+    0,
+    INBOX_LIMIT
+  );
+  record({ kind: 'received', contactId: contact.id, name: contact.name, text: entry.text });
+}
+
+async function readThread({ to, limit = 30 }) {
+  const found = rules.resolveTarget(settings.contacts, to);
+  if (found.error) {
+    return {
+      status: 400,
+      body: {
+        error: found.error,
+        query: String(to ?? ''),
+        matches: (found.matches || []).map((item) => item.name)
+      }
+    };
+  }
+  const contact = found.contact;
+  const chat = await client.getChatById(await resolveChatId(contact));
+  const messages = await chat.fetchMessages({ limit: Math.min(Number(limit) || 30, 100) });
+  return {
+    body: {
+      contact: contact.name,
+      messages: messages.map((message) => ({
+        at: (message.timestamp || 0) * 1000,
+        from: message.fromMe ? 'me' : contact.name,
+        // A message he typed himself and one Herald sent for him both come back
+        // as fromMe; the marker is the only thing that tells them apart.
+        byAgent: message.fromMe ? signature.isSigned(message.body || '') : false,
+        text: signature.strip(message.body || ''),
+        hasMedia: Boolean(message.hasMedia)
+      }))
+    }
+  };
+}
+
+/* ------------------------------------------------------------------ session */
+
+function startSession() {
+  if (client) return;
+  state.connection = 'connecting';
+  state.error = null;
+
+  let chrome;
+  try {
+    chrome = chromeExecutable();
+  } catch (error) {
+    state.connection = 'error';
+    state.error = error.message;
+    return;
+  }
+
+  client = new Client({
+    authStrategy: new LocalAuth({ clientId: 'herald', dataPath: path.join(home(), 'whatsapp') }),
+    puppeteer: {
+      headless: true,
+      executablePath: chrome,
+      args: ['--no-sandbox', '--disable-setuid-sandbox']
+    }
+  });
+
+  client.on('qr', (qr) => {
+    // Kept raw. `herald login` reads it from here and draws it in his terminal,
+    // which is the only screen this app ever uses.
+    state.qr = qr;
+    state.connection = 'scan_qr';
+  });
+  client.on('authenticated', () => {
+    state.qr = null;
+    state.connection = 'authenticating';
+  });
+  client.on('ready', () => {
+    state.qr = null;
+    state.error = null;
+    state.connection = 'ready';
+    resolveMissingContactIds().catch((error) => console.warn('resolve:', error.message));
+  });
+  client.on('auth_failure', (reason) => {
+    state.connection = 'error';
+    state.error = `WhatsApp refused the session: ${reason}`;
+  });
+  client.on('disconnected', (reason) => {
+    client = null;
+    state.connection = 'disconnected';
+    state.error = `WhatsApp disconnected: ${reason}`;
+  });
+  client.on('message', (message) => {
+    try {
+      handleIncoming(message);
+    } catch (error) {
+      console.error('incoming:', error.message);
+    }
+  });
+
+  client.initialize().catch((error) => {
+    client = null;
+    state.connection = 'error';
+    state.error = `Could not start the WhatsApp session: ${error.message}`;
+  });
+}
+
+function requireReady() {
+  if (!client || state.connection !== 'ready') throw new Error('WhatsApp is not connected.');
+}
+
+/* ------------------------------------------------------------------- routes */
+
+const routes = {
+  'GET /status': async () => ({
+    body: {
+      connection: state.connection,
+      contacts: settings.contacts.length,
+      pending: state.pending.length,
+      unread: state.inbox.filter((item) => !item.read).length,
+      uptimeSeconds: Math.round((Date.now() - state.startedAt) / 1000),
+      error: state.error
+    }
+  }),
+
+  // What `herald login` polls: the raw QR string, or the fact that it is no
+  // longer needed.
+  'GET /qr': async () => ({ body: { connection: state.connection, qr: state.qr } }),
+
+  'POST /login': async () => {
+    startSession();
+    return { body: { connection: state.connection } };
+  },
+
+  // Unlinking is a real WhatsApp operation, not just closing the browser: the
+  // device disappears from his phone's Linked devices list.
+  'POST /logout': async () => {
+    const current = client;
+    client = null;
+    state.connection = 'disconnected';
+    state.qr = null;
+    if (current) {
+      await current.logout().catch(() => {});
+      await current.destroy().catch(() => {});
+    }
+    return { body: { ok: true } };
+  },
+
+  'GET /contacts': async () => ({
+    body: {
+      contacts: settings.contacts.map((contact) => ({
+        name: contact.name,
+        phone: contactId.displayNumber(contact.phone),
+        mode: rules.normalizeMode(contact.mode),
+        note: contact.note || ''
+      }))
+    }
+  }),
+
+  // The phone book, for `herald allow` to pick from. Reading it is not the same
+  // as being allowed to write to anybody in it.
+  'GET /phonebook': async ({ query }) => {
+    requireReady();
+    const all = await phoneBook();
+    const needle = String(query ?? '').toLowerCase();
+    return {
+      body: {
+        contacts: needle
+          ? all.filter((contact) => contact.name.toLowerCase().includes(needle))
+          : all
+      }
+    };
+  },
+
+  'POST /contacts/add': async ({ name, phone, waId, mode, note }) => {
+    const digits = contactId.userPartOf(phone);
+    if (!digits) return { status: 400, body: { error: 'bad_number' } };
+    const already = settings.contacts.find((contact) =>
+      contactId.sameContact(contact.phone, digits)
+    );
+    const entry = {
+      id: already?.id || crypto.randomUUID().slice(0, 8),
+      name: String(name || already?.name || digits).trim(),
+      phone: digits,
+      waId: waId || already?.waId || '',
+      note: note === undefined ? already?.note || '' : String(note).trim(),
+      mode: rules.normalizeMode(mode ?? already?.mode)
+    };
+    settings.contacts = [...settings.contacts.filter((c) => c.id !== entry.id), entry].sort(
+      (a, b) => a.name.localeCompare(b.name)
+    );
+    save();
+    return { body: { contact: { name: entry.name, mode: entry.mode } } };
+  },
+
+  'POST /contacts/remove': async ({ name }) => {
+    const found = rules.resolveTarget(settings.contacts, name);
+    if (found.error)
+      return { status: 400, body: { error: found.error, query: String(name ?? '') } };
+    settings.contacts = settings.contacts.filter((contact) => contact.id !== found.contact.id);
+    save();
+    return { body: { removed: found.contact.name } };
+  },
+
+  'POST /send': async ({ to, text, note }) => {
+    requireReady();
+    return requestSend({ to, text, note });
+  },
+
+  'GET /pending': async () => ({
+    body: {
+      pending: state.pending.map((item) => ({
+        id: item.id,
+        to: item.name,
+        text: item.text,
+        note: item.note,
+        at: item.at
+      }))
+    }
+  }),
+
+  'POST /pending/decide': async ({ id, action }) => {
+    if (action === 'approve') requireReady();
+    return decidePending({ id, action });
+  },
+
+  'GET /request': async ({ id }) => {
+    if (state.pending.some((item) => item.id === id)) return { body: { status: 'pending', id } };
+    const decided = state.journal.find(
+      (entry) => entry.kind === 'rejected' || entry.kind === 'sent'
+    );
+    return { body: { status: decided?.kind === 'rejected' ? 'rejected' : 'done', id } };
+  },
+
+  'GET /inbox': async ({ unread }) => {
+    const wanted = String(unread ?? '') === 'true';
+    return {
+      body: {
+        messages: state.inbox
+          .filter((item) => (wanted ? !item.read : true))
+          .map(({ name, at, text, hasMedia, read }) => ({ from: name, at, text, hasMedia, read }))
+      }
+    };
+  },
+
+  'POST /inbox/read': async () => {
+    state.inbox = state.inbox.map((item) => ({ ...item, read: true }));
+    return { body: { ok: true } };
+  },
+
+  'GET /thread': async ({ to, limit }) => {
+    requireReady();
+    return readThread({ to, limit });
+  },
+
+  'GET /journal': async ({ limit }) => ({
+    body: { entries: state.journal.slice(0, Math.min(Number(limit) || 30, JOURNAL_LIMIT)) }
+  }),
+
+  'POST /stop': async () => {
+    // Answer first, then go: the client is waiting on this response, and the
+    // browser takes a moment to close.
+    setTimeout(() => shutdown(), 50);
+    return { body: { ok: true } };
+  }
+};
+
+/* ----------------------------------------------------------------- shutdown */
+
+// Leaving without this strands a headless Chrome holding the WhatsApp session:
+// invisible, alive, and the next `herald login` then fights it for the profile
+// directory. Measured on 19/09/2026 — `herald stop` reported success and left
+// four Chrome processes running.
+let leaving = false;
+
+async function shutdown(code = 0) {
+  if (leaving) return;
+  leaving = true;
+  const current = client;
+  client = null;
+  if (current) {
+    await Promise.race([
+      current.destroy().catch(() => {}),
+      new Promise((resolve) => setTimeout(resolve, 8000))
+    ]);
+  }
+  try {
+    fs.unlinkSync(path.join(home(), 'bridge.json'));
+  } catch {
+    /* it may already be gone */
+  }
+  process.exit(code);
+}
+
+/* -------------------------------------------------------------------- start */
+
+async function main() {
+  fs.mkdirSync(home(), { recursive: true });
+  load();
+
+  const bridge = createBridge({
+    token: () => settings.token,
+    routes,
+    onError: (error) => console.error('bridge:', error.message)
+  });
+
+  let port;
+  try {
+    port = await bridge.listen(settings.port);
+  } catch (error) {
+    console.error(
+      error.code === 'EADDRINUSE'
+        ? `Port ${settings.port} is taken — Herald may already be running.`
+        : `Could not open the local bridge: ${error.message}`
+    );
+    process.exit(1);
+  }
+
+  // How every client finds the door, so nothing has to be configured twice.
+  writeJson(path.join(home(), 'bridge.json'), { port, token: settings.token, pid: process.pid });
+  console.log(`herald: listening on 127.0.0.1:${port} (pid ${process.pid})`);
+
+  // A session that has been linked before comes back on its own; a first run
+  // waits for `herald login` so nothing spins up a browser for nothing.
+  if (fs.existsSync(path.join(home(), 'whatsapp', 'session-herald'))) startSession();
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
+  process.on('unhandledRejection', (reason) => console.error('unhandled:', reason));
+}
+
+main();

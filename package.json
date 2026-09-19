@@ -1,0 +1,32 @@
+{
+  "name": "herald",
+  "productName": "Herald",
+  "version": "1.0.0",
+  "description": "Lends an AI agent a voice on WhatsApp, under rules you set. Command line only.",
+  "license": "MIT",
+  "author": "nspxmiguel (https://nspx.dev)",
+  "homepage": "https://www.nspx.dev/Herald/",
+  "main": "src/daemon.cjs",
+  "type": "commonjs",
+  "bin": {
+    "herald": "bin/herald"
+  },
+  "scripts": {
+    "start": "node src/daemon.cjs",
+    "mcp": "node mcp/server.mjs",
+    "test": "bun test",
+    "format": "prettier --write .",
+    "check": "prettier --check . && bun test"
+  },
+  "dependencies": {
+    "qrcode": "^1.5.4",
+    "whatsapp-web.js": "^1.33.0"
+  },
+  "devDependencies": {
+    "prettier": "^3.6.2"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "trustedDependencies": []
+}
