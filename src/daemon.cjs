@@ -447,12 +447,47 @@ async function decidePending({ id, action, always = false, by = 'owner' }) {
 // Herald reads exactly as much of his WhatsApp as it writes to: the people on
 // the list, and nobody else. Anyone else is dropped here, before being stored,
 // counted or shown — his conversations are not the agent's to see.
-function handleIncoming(message) {
+// Learns which @lid belongs to which contact, the only way that link can be
+// made: ask WhatsApp who sent this. Done once per contact and written down, so
+// the next message from them matches without a lookup.
+async function linkLid(message) {
+  try {
+    const who = await message.getContact();
+    const number = who?.number || who?.id?.user || '';
+    if (!number) return null;
+    const contact = contactId.findContact(settings.contacts, number);
+    if (!contact) return null;
+    contact.lid = message.from;
+    save();
+    console.log(`herald: ${contact.name} also answers as ${message.from} — linked`);
+    return contact;
+  } catch (error) {
+    console.log(`herald: could not resolve ${message.from} (${error.message})`);
+    return null;
+  }
+}
+
+async function handleIncoming(message) {
   if (message.fromMe) return;
-  if (!contactId.isPersonId(message.from || '')) return;
-  const contact = contactId.findContact(settings.contacts, message.from);
-  if (!contact) return;
-  if (rules.normalizeMode(contact.mode) === 'off') return;
+  // Which of the three filters dropped it, and never the body: this is a log
+  // file, and the point is to tell "the event never fired" apart from "it fired
+  // and we threw it away".
+  const from = message.from || '';
+  if (!contactId.isPersonId(from)) {
+    console.log(`herald: incoming from ${from} — not a person id, dropped`);
+    return;
+  }
+  let contact = contactId.findContact(settings.contacts, from);
+  if (!contact && contactId.isLid(from)) contact = await linkLid(message);
+  if (!contact) {
+    console.log(`herald: incoming from ${from} — no contact on the list matches, dropped`);
+    return;
+  }
+  if (rules.normalizeMode(contact.mode) === 'off') {
+    console.log(`herald: incoming from ${contact.name} — switched off, dropped`);
+    return;
+  }
+  console.log(`herald: incoming from ${contact.name} — kept`);
 
   const entry = {
     id: message.id?._serialized || crypto.randomUUID(),
@@ -527,6 +562,18 @@ function startSession() {
     }
   });
 
+  // Off unless asked for, and names only — never message contents. This is what
+  // tells a dead event layer apart from a filter throwing traffic away, without
+  // needing anybody to send a message to prove it. It is how the dropped @lid
+  // above was found: the events were firing all along.
+  if (process.env.HERALD_TRACE_EVENTS) {
+    const emit = client.emit.bind(client);
+    client.emit = (event, ...rest) => {
+      console.log(`herald: event ${String(event)}`);
+      return emit(event, ...rest);
+    };
+  }
+
   client.on('qr', (qr) => {
     // Kept raw. `herald login` reads it from here and draws it in his terminal,
     // which is the only screen this app ever uses.
@@ -552,6 +599,13 @@ function startSession() {
     state.connection = 'disconnected';
     state.error = `WhatsApp disconnected: ${reason}`;
   });
+  // Both names for the same traffic. 'message' is the documented one; on builds
+  // where it goes quiet, 'message_create' still carries incoming messages, and
+  // handleIncoming drops anything fromMe anyway.
+  client.on('message_create', (message) => {
+    if (!message?.fromMe) handleIncoming(message);
+  });
+
   client.on('message', (message) => {
     try {
       handleIncoming(message);

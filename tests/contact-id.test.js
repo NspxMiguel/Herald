@@ -61,3 +61,24 @@ describe('matching a person across the forms WhatsApp uses', () => {
     expect(contactId.sameContact('5511', '5512')).toBe(false);
   });
 });
+
+// A @lid is an opaque account id. Matching it by number is not merely unlikely
+// to work — it cannot work, and when it silently failed the agent asked
+// questions it never heard the answers to.
+test('a lid matches only the contact it was linked to, never by number', () => {
+  const davi = { id: 'd', name: 'Davi', phone: '554792078506' };
+  const lid = '220301992398854@lid';
+  expect(contactId.isLid(lid)).toBe(true);
+  expect(contactId.matchesContact(davi, lid)).toBe(false);
+
+  const linked = { ...davi, lid };
+  expect(contactId.matchesContact(linked, lid)).toBe(true);
+  expect(contactId.findContact([linked], lid).name).toBe('Davi');
+});
+
+test('a linked lid does not make that contact answer for somebody else', () => {
+  const linked = { id: 'd', name: 'Davi', phone: '554792078506', lid: '220301992398854@lid' };
+  expect(contactId.matchesContact(linked, '999999999999@lid')).toBe(false);
+  // and the phone still matches on the normal server
+  expect(contactId.matchesContact(linked, '554792078506@c.us')).toBe(true);
+});

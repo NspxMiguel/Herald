@@ -83,8 +83,23 @@ function sameContact(a, b) {
 
 // A stored contact may carry the serialized WhatsApp id it was picked from plus a
 // plain phone number; an incoming message matches if either one lines up.
+// A @lid is an opaque account id, not a phone number: 220301992398854@lid tells
+// you nothing about who it is, so no number variant will ever match it. WhatsApp
+// addresses some chats that way, and an incoming message carrying one used to
+// match nobody and be dropped — the agent asked a question and never heard the
+// answer. The link between the two is learned once (see linkLid) and kept on the
+// contact, because only WhatsApp can make it.
+function isLid(value) {
+  return String(value ?? '')
+    .trim()
+    .endsWith('@lid');
+}
+
 function matchesContact(contact, whatsappId) {
   if (!contact) return false;
+  if (isLid(whatsappId)) {
+    return Boolean(contact.lid) && userPartOf(contact.lid) === userPartOf(whatsappId);
+  }
   return [contact.waId, contact.phone].some(
     (candidate) => candidate && sameContact(candidate, whatsappId)
   );
@@ -106,6 +121,7 @@ module.exports = {
   numberVariants,
   looseKey,
   isPersonId,
+  isLid,
   sameContact,
   matchesContact,
   findContact,
