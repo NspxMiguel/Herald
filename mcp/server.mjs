@@ -74,7 +74,11 @@ async function call(method, route, payload) {
         'it draws a QR code for him to scan, and that is the only step he has to do.',
       not_listed:
         `"${payload?.to ?? 'that person'}" is not on Herald's list. Ask Miguel to run ` +
-        `\`herald allow "${payload?.to ?? 'Name'}" --auto\` — the agent cannot add contacts itself.`,
+        `\`herald allow "${payload?.to ?? 'Name'}" --auto\`, or \`herald mode ask\` to be asked ` +
+        'about every message instead of listing people one by one. The agent cannot do either itself.',
+      not_in_phonebook:
+        `"${payload?.to ?? 'that person'}" is not in Miguel's WhatsApp contacts. Herald only ` +
+        'reaches people he has saved — check the spelling, or ask him for the right name.',
       ambiguous: `More than one contact matches: ${(body.matches || []).join(', ')}.`,
       group: 'Herald never writes to groups.',
       muted: 'That contact is switched off in Herald.',
@@ -90,10 +94,13 @@ const TOOLS = [
   {
     name: 'herald_send',
     description:
-      "Send a WhatsApp message from Miguel's account to somebody he put on Herald's list. " +
-      'Contacts set to "auto" receive it immediately; contacts set to "ask" put the message ' +
-      'in his approval queue and it is NOT delivered until he approves it — the reply says which happened. ' +
-      'Use this instead of driving his phone. Never writes to groups.',
+      "Send a WhatsApp message from Miguel's account. Use this instead of driving his phone. " +
+      'Whether it goes out or waits depends on his settings, and the reply always says which ' +
+      'happened: "sent" means delivered, "queued" means it is sitting in his approval queue and ' +
+      'has NOT been delivered — do not tell him it was sent, and do not resend it. ' +
+      'In his "ask" mode anyone in his contacts is reachable and every message is queued; in ' +
+      '"list" mode only people on the list are reachable, each with their own setting. ' +
+      'Never writes to groups. Check herald_status when you need to know which mode is on.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -144,7 +151,9 @@ const TOOLS = [
   },
   {
     name: 'herald_status',
-    description: 'Whether the WhatsApp session is connected, and how much is waiting for approval.',
+    description:
+      'Whether the WhatsApp session is linked, which global mode is on (list / ask), and how much ' +
+      'is waiting for his approval.',
     inputSchema: { type: 'object', properties: {} }
   }
 ];
@@ -155,7 +164,9 @@ async function runTool(name, args = {}) {
       const result = await call('POST', '/send', args);
       return result.status === 'sent'
         ? `Sent to ${result.to}.`
-        : `Queued for ${result.to} — waiting for Miguel to approve (id ${result.id}). Not delivered yet.`;
+        : `Queued for ${result.to} — waiting for Miguel to approve (id ${result.id}). NOT delivered yet. ` +
+            'He decides with `herald approve` / `herald reject`; tell him it is waiting rather than ' +
+            'reporting it as sent.';
     }
     case 'herald_contacts': {
       const { contacts } = await call('GET', '/contacts');

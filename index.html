@@ -246,6 +246,33 @@ sent to Dad</pre>
 
       <img class="shot" src="assets/terminal.webp" alt="Herald no terminal" />
 
+      <h2 data-lang="pt">Dois jeitos de usar</h2>
+      <h2 data-lang="en">Two ways to run it</h2>
+
+      <pre data-lang="pt"><i>$</i> <b>herald mode list</b>   <i># o padrão: só quem você listou</i>
+<i>$</i> <b>herald mode ask</b>    <i># qualquer contato seu, e você aprova cada mensagem</i></pre>
+      <pre
+        data-lang="en"
+      ><i>$</i> <b>herald mode list</b>   <i># the default: only people you listed</i>
+<i>$</i> <b>herald mode ask</b>    <i># anyone in your contacts, and you approve every message</i></pre>
+
+      <p data-lang="pt">
+        O <code>list</code> é para configurar alguém uma vez e esquecer: seu pai em
+        <code>auto</code>, e o agente pede uma porta a ele sem envolver você. O <code>ask</code> é
+        para não configurar ninguém — o agente alcança qualquer pessoa salva no seu telefone, e
+        <strong>toda mensagem espera você aprovar</strong>, inclusive para contatos marcados como
+        <code>auto</code>. Modo com exceção escondida não é trava, então este não tem nenhuma. Quem
+        você pôs em <code>off</code> continua recusado nos dois.
+      </p>
+      <p data-lang="en">
+        <code>list</code> is for setting somebody up once and forgetting about it: your father on
+        <code>auto</code>, and the agent asks him for a port without involving you. <code>ask</code>
+        is for not setting anybody up — the agent can reach anyone saved in your phone, and
+        <strong>every single message waits for your approval</strong>, including messages to
+        contacts you marked <code>auto</code>. A mode with a hidden exception is not a guard, so
+        this one has none. A contact you set to <code>off</code> is refused in either.
+      </p>
+
       <h2 data-lang="pt">O que mantém isso seguro</h2>
       <h2 data-lang="en">What keeps this safe</h2>
 
@@ -264,13 +291,13 @@ sent to Dad</pre>
         <tr>
           <td data-lang="pt">Lista de permissão</td>
           <td data-lang="pt">
-            Ninguém é alcançável até você adicionar. Lista vazia quer dizer que nada pode ser
-            enviado, para ninguém.
+            Ninguém é alcançável até você adicionar — ou até você trocar para o modo
+            <code>ask</code>, em que você aprova cada mensagem no lugar de manter lista.
           </td>
           <td data-lang="en">Allow-list</td>
           <td data-lang="en">
-            Nobody is reachable until you add them. An empty list means nothing can be sent, to
-            anybody.
+            Nobody is reachable until you add them — or until you switch to <code>ask</code> mode,
+            where you approve every message instead of keeping a list.
           </td>
         </tr>
         <tr>
@@ -334,11 +361,11 @@ sent to Dad</pre>
       <pre data-lang="pt"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
 <i>$</i> <b>cd Herald && bun install</b>
 <i>$</i> <b>herald login</b>            <i># desenha o QR aqui</i>
-<i>$</i> <b>herald allow "Pai" --auto</b></pre>
+<i>$</i> <b>herald allow "Pai" --auto</b>   <i># ou: herald mode ask</i></pre>
       <pre data-lang="en"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
 <i>$</i> <b>cd Herald && bun install</b>
 <i>$</i> <b>herald login</b>            <i># draws the QR here</i>
-<i>$</i> <b>herald allow "Dad" --auto</b></pre>
+<i>$</i> <b>herald allow "Dad" --auto</b>   <i># or: herald mode ask</i></pre>
 
       <p data-lang="pt">
         Herald usa o Chrome que já está na máquina — não baixa navegador nenhum. Também roda como

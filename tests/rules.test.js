@@ -72,3 +72,59 @@ test('a phone number reaches a listed contact, and only a listed one', () => {
   expect(rules.resolveTarget(people, '+55 47 9999-9999').contact.id).toBe('a');
   expect(rules.resolveTarget(people, '5511911112222').error).toBe('not_listed');
 });
+
+test('the global ask mode makes even an auto contact wait', () => {
+  const decision = rules.decideSend({ contacts: people, target: 'Pai', text: 'oi', gate: 'ask' });
+  expect(decision.allowed).toBe(true);
+  expect(decision.delivery).toBe('pending');
+});
+
+test('ask mode still refuses a contact set to off', () => {
+  expect(
+    rules.decideSend({ contacts: people, target: 'Bruno', text: 'oi', gate: 'ask' }).reason
+  ).toBe('muted');
+});
+
+test('ask mode accepts a contact resolved outside the list, always queued', () => {
+  const guest = { id: 'book:554766665555', name: 'Vizinho', phone: '554766665555', mode: 'ask' };
+  const decision = rules.decideSend({
+    contacts: people,
+    target: 'Vizinho',
+    text: 'oi',
+    gate: 'ask',
+    contact: guest
+  });
+  expect(decision.delivery).toBe('pending');
+});
+
+test('a guest is refused in list mode, which is what the list is for', () => {
+  const decision = rules.decideSend({ contacts: people, target: 'Vizinho', text: 'oi' });
+  expect(decision.reason).toBe('not_listed');
+});
+
+test('an unknown gate falls back to list, never to the permissive one', () => {
+  expect(rules.normalizeGate('open')).toBe('list');
+  expect(rules.normalizeGate(undefined)).toBe('list');
+  expect(rules.normalizeGate('ASK')).toBe('ask');
+});
+
+test('the rate limit still applies in ask mode', () => {
+  const now = Date.now();
+  const log = { 554799999999: Array.from({ length: rules.RATE_MAX_PER_WINDOW }, () => now) };
+  expect(
+    rules.decideSend({ contacts: people, target: 'Pai', text: 'oi', gate: 'ask', log, now }).reason
+  ).toBe('rate_limited');
+});
+
+test('groups are refused in ask mode too', () => {
+  const guest = { id: 'g', name: 'Família', phone: '554755555555', mode: 'ask', isGroup: true };
+  expect(
+    rules.decideSend({
+      contacts: people,
+      target: 'Família',
+      text: 'oi',
+      gate: 'ask',
+      contact: guest
+    }).reason
+  ).toBe('group');
+});

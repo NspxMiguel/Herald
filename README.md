@@ -16,6 +16,24 @@ herald send "Dad" "Can you open TCP 8793 on the VPS for the nspx user?"
 There is no window. You link WhatsApp once, by scanning a QR code drawn in your
 terminal, and after that the agent talks to people through the command line.
 
+## Two ways to run it
+
+```bash
+herald mode list   # the default: only people you listed, each with its own setting
+herald mode ask    # anyone in your contacts, and every message waits for you
+```
+
+`list` is for setting somebody up once and forgetting about it — your father on
+`auto`, and the agent asks him for a port without involving you at all.
+
+`ask` is for not setting anybody up. The agent can reach anyone saved in your
+phone, and **every single message waits for your approval**, including messages
+to contacts you marked `auto`. A mode with a hidden exception is not a guard, so
+this one has none. A contact you set to `off` is still refused, in either mode.
+
+In `ask` mode the target is resolved against your WhatsApp address book, so the
+agent cannot write to a number you never saved.
+
 ## What keeps this safe
 
 Handing an agent a WhatsApp account is handing it a voice that other people will
@@ -57,7 +75,15 @@ herald login
 A QR code appears in the terminal. On your phone: WhatsApp → Settings → Linked
 devices → Link a device. It is asked once; the session survives restarts.
 
-**Decide who the agent may write to:**
+**Decide how you want to be asked:**
+
+```bash
+herald mode ask                # approve each message; no list to maintain
+herald mode list               # the list decides (default)
+herald mode                    # which one is on
+```
+
+**Or set people up once, so you are not asked at all:**
 
 ```bash
 herald allow "Dad" --auto      # goes out immediately
@@ -99,8 +125,12 @@ So the agent can reach Herald without shelling out. In your MCP config:
 ```
 
 Tools: `herald_send`, `herald_contacts`, `herald_inbox`, `herald_thread`,
-`herald_status`. The agent cannot add contacts or change a mode through any of
-them — that is deliberate, and it is the whole point of the list.
+`herald_status`. The agent cannot add contacts, change a contact's setting or
+switch the global mode through any of them — that is deliberate, and it is the
+whole point of both.
+
+`herald_send` answers `sent` or `queued`, and they mean different things: a
+queued message has not been delivered and is sitting in your approval queue.
 
 ## How it fits together
 
@@ -125,9 +155,10 @@ bun test
 ```
 
 The suite covers the rules that matter: an unlisted name is refused rather than
-guessed, a contact with no mode set is `ask`, groups are refused even on `auto`,
-the rate limit counts, the marker survives `trimEnd`, and the bridge answers
-nothing without the token.
+guessed, a contact with no mode set is `ask`, groups are refused even on `auto`
+and even in `ask` mode, an unknown mode falls back to the restrictive one, the
+rate limit counts in both modes, the marker survives `trimEnd`, and the bridge
+answers nothing without the token.
 
 ## License
 

@@ -27,6 +27,9 @@ const INBOX_LIMIT = 200;
 
 const defaults = {
   contacts: [],
+  // 'list' keeps to the allow-list; 'ask' lets the agent reach anybody in his
+  // address book and makes every message wait for him. See core/rules.cjs.
+  gate: rules.DEFAULT_GATE,
   port: DEFAULT_PORT,
   token: '',
   notify: true
@@ -57,6 +60,7 @@ function load() {
   settings = {
     ...defaults,
     ...saved,
+    gate: rules.normalizeGate(saved.gate),
     contacts: (saved.contacts || []).map((contact) => ({
       ...contact,
       mode: rules.normalizeMode(contact.mode)
@@ -201,12 +205,51 @@ function phoneBook() {
 
 /* ------------------------------------------------------------------ sending */
 
+// In 'ask' mode the target does not have to be on the list, but it does have to
+// be a real contact in his phone: a name he never saved is not somebody the
+// agent gets to message, and a raw number is not a person he knows.
+async function fromPhoneBook(target) {
+  const query = String(target ?? '').trim();
+  if (!query) return null;
+  const all = await phoneBook();
+  const digits = contactId.digitsOf(query);
+
+  const byNumber =
+    digits.length >= 8 ? all.filter((entry) => contactId.sameContact(entry.phone, digits)) : [];
+  const folded = query.toLowerCase();
+  const exact = all.filter((entry) => entry.name.toLowerCase() === folded);
+  const partial = all.filter((entry) => entry.name.toLowerCase().includes(folded));
+  const hits = byNumber.length ? byNumber : exact.length ? exact : partial;
+
+  if (!hits.length) return { error: 'not_in_phonebook' };
+  if (hits.length > 1) return { error: 'ambiguous', matches: hits.map((entry) => entry.name) };
+  return { contact: { ...hits[0], id: `book:${hits[0].phone}`, mode: 'ask', ephemeral: true } };
+}
+
 async function requestSend({ to, text, note, origin = 'agent' }) {
+  const asking = rules.normalizeGate(settings.gate) === 'ask';
+  let guest;
+
+  if (asking && rules.resolveTarget(settings.contacts, to).error) {
+    requireReady();
+    const found = await fromPhoneBook(to);
+    if (found?.error) {
+      record({ kind: 'refused', name: String(to ?? ''), reason: found.error, text });
+      return {
+        status: 400,
+        body: { error: found.error, query: String(to ?? ''), matches: found.matches }
+      };
+    }
+    guest = found?.contact;
+  }
+
   const decision = rules.decideSend({
     contacts: settings.contacts,
     target: to,
     text,
-    log: sendLog
+    log: sendLog,
+    gate: settings.gate,
+    contact: guest
   });
 
   if (!decision.allowed) {
@@ -242,6 +285,9 @@ async function requestSend({ to, text, note, origin = 'agent' }) {
     id: crypto.randomUUID().slice(0, 8),
     at: Date.now(),
     contactId: contact.id,
+    // A guest resolved from the phone book is on no list, so the queue carries
+    // the whole contact: approving must not depend on him adding them first.
+    contact: contact.ephemeral ? contact : null,
     name: contact.name,
     text: body,
     note: String(note ?? '').trim(),
@@ -263,9 +309,22 @@ async function decidePending({ id, action }) {
     return { body: { status: 'rejected', id, to: item.name } };
   }
 
-  const contact = settings.contacts.find((candidate) => candidate.id === item.contactId);
+  const contact =
+    settings.contacts.find((candidate) => candidate.id === item.contactId) || item.contact;
   if (!contact) return { status: 404, body: { error: 'not_listed' } };
   const sent = await deliver(contact, item.text);
+
+  // Approving a message to somebody off the list opens that conversation: their
+  // reply has to reach the agent, otherwise it asked a question it can never
+  // hear the answer to. They join the list at 'ask', marked as having arrived
+  // this way — never at 'auto', and never without him having approved first.
+  if (contact.ephemeral && !settings.contacts.some((entry) => entry.id === contact.id)) {
+    const { ephemeral, ...entry } = contact;
+    settings.contacts = [...settings.contacts, { ...entry, mode: 'ask', viaApproval: true }].sort(
+      (a, b) => a.name.localeCompare(b.name)
+    );
+    save();
+  }
   record({
     kind: 'sent',
     contactId: contact.id,
@@ -410,6 +469,7 @@ const routes = {
   'GET /status': async () => ({
     body: {
       connection: state.connection,
+      gate: rules.normalizeGate(settings.gate),
       contacts: settings.contacts.length,
       pending: state.pending.length,
       unread: state.inbox.filter((item) => !item.read).length,
@@ -441,13 +501,26 @@ const routes = {
     return { body: { ok: true } };
   },
 
+  'GET /mode': async () => ({ body: { gate: rules.normalizeGate(settings.gate) } }),
+
+  'POST /mode': async ({ gate }) => {
+    if (!rules.GATES.includes(String(gate ?? '').toLowerCase())) {
+      return { status: 400, body: { error: 'bad_gate', allowed: rules.GATES } };
+    }
+    settings.gate = rules.normalizeGate(gate);
+    save();
+    return { body: { gate: settings.gate } };
+  },
+
   'GET /contacts': async () => ({
     body: {
+      gate: rules.normalizeGate(settings.gate),
       contacts: settings.contacts.map((contact) => ({
         name: contact.name,
         phone: contactId.displayNumber(contact.phone),
         mode: rules.normalizeMode(contact.mode),
-        note: contact.note || ''
+        note: contact.note || '',
+        viaApproval: Boolean(contact.viaApproval)
       }))
     }
   }),

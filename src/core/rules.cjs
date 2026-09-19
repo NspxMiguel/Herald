@@ -13,11 +13,23 @@
 //   4. a rate limit applies even to 'auto' contacts, so a loop in the agent
 //      cannot turn into forty messages to somebody's father;
 //   5. reading is scoped to the same list — the rest of the mailbox is his.
+//
+// On top of those sits one global switch, because listing people one by one is
+// work the owner should not have to do up front:
+//
+//   'list' (default)  the five rules exactly as written above;
+//   'ask'             anyone in his WhatsApp address book is a valid target and
+//                     every single message waits for him — including messages to
+//                     contacts he marked 'auto'. A mode with a hidden exception
+//                     is not a guard, it is a trap, so this one has none.
 
 const contactId = require('./contact-id.cjs');
 
 const MODES = ['ask', 'auto', 'off'];
 const DEFAULT_MODE = 'ask';
+
+const GATES = ['list', 'ask'];
+const DEFAULT_GATE = 'list';
 
 // Per contact, per hour. Chosen to be comfortably above any honest use (a
 // question, a follow-up, a thank-you) and far below anything that reads as a
@@ -32,6 +44,13 @@ function normalizeMode(value) {
     .trim()
     .toLowerCase();
   return MODES.includes(mode) ? mode : DEFAULT_MODE;
+}
+
+function normalizeGate(value) {
+  const gate = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  return GATES.includes(gate) ? gate : DEFAULT_GATE;
 }
 
 // The agent addresses people the way the owner does: by name. Exact match first,
@@ -69,14 +88,16 @@ function recentSends(log, contact, now = Date.now()) {
 
 // The single decision the rest of the app asks for: may this text go to this
 // target right now, and if so does it leave immediately or wait for the owner.
-function decideSend({ contacts, target, text, log = {}, now = Date.now() }) {
+function decideSend({ contacts, target, text, log = {}, now = Date.now(), gate, contact: given }) {
   const body = String(text ?? '').trim();
   if (!body) return { allowed: false, reason: 'empty_message' };
   if (body.length > MAX_MESSAGE_LENGTH) {
     return { allowed: false, reason: 'too_long', limit: MAX_MESSAGE_LENGTH };
   }
 
-  const found = resolveTarget(contacts, target);
+  // In 'ask' mode the caller may have resolved somebody straight from the phone
+  // book, who is on no list and never will be. Everything below still applies.
+  const found = given ? { contact: given } : resolveTarget(contacts, target);
   if (found.error) {
     return {
       allowed: false,
@@ -89,6 +110,8 @@ function decideSend({ contacts, target, text, log = {}, now = Date.now() }) {
   if (contact.isGroup) return { allowed: false, reason: 'group', contact };
 
   const mode = normalizeMode(contact.mode);
+  // 'off' is the owner saying no to this person specifically, which outranks the
+  // global switch in both directions.
   if (mode === 'off') return { allowed: false, reason: 'muted', contact };
 
   const recent = recentSends(log, contact, now);
@@ -101,12 +124,22 @@ function decideSend({ contacts, target, text, log = {}, now = Date.now() }) {
     };
   }
 
-  return { allowed: true, contact, mode, delivery: mode === 'auto' ? 'sent' : 'pending' };
+  const asking = normalizeGate(gate) === 'ask';
+  return {
+    allowed: true,
+    contact,
+    mode,
+    gate: normalizeGate(gate),
+    delivery: !asking && mode === 'auto' ? 'sent' : 'pending'
+  };
 }
 
 module.exports = {
   MODES,
   DEFAULT_MODE,
+  GATES,
+  DEFAULT_GATE,
+  normalizeGate,
   RATE_WINDOW_MS,
   RATE_MAX_PER_WINDOW,
   MAX_MESSAGE_LENGTH,

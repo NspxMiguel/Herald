@@ -96,7 +96,9 @@ function explain(body, status) {
     bad_token: 'The token does not match. Run: herald restart',
     not_connected:
       'WhatsApp is not linked yet.\nRun: herald login  — it draws a QR code here for you to scan.',
-    not_listed: `"${body.query || 'that person'}" is not on the list.\nRun: herald allow "${body.query || 'Name'}"`,
+    not_listed: `"${body.query || 'that person'}" is not on the list.\nRun: herald allow "${body.query || 'Name'}"  — or herald mode ask, to be asked instead of listing people`,
+    not_in_phonebook: `"${body.query || 'that person'}" is not in your WhatsApp contacts. Herald only reaches people you have saved.`,
+    bad_gate: `The mode is one of: ${(body.allowed || []).join(', ')}`,
     ambiguous: `More than one contact matches: ${(body.matches || []).join(', ')}. Use the full name.`,
     group: 'Herald never writes to groups.',
     muted: 'That contact is switched off. Run: herald allow "name" --ask',
@@ -132,6 +134,9 @@ const usage = `herald — send WhatsApp messages through Miguel's account, withi
 
   For Miguel
     herald login                       link WhatsApp: draws the QR code here
+    herald mode ask                    the agent may reach anyone in your
+                                       contacts, and asks you every time
+    herald mode list                   back to the list only (the default)
     herald allow NAME [--auto|--ask]   let the agent write to somebody
     herald deny NAME                   take them off the list
     herald pending                     what the agent wants to send
@@ -147,9 +152,15 @@ const usage = `herald — send WhatsApp messages through Miguel's account, withi
     herald contacts                    who is reachable, and how
     herald status                      is it linked, is anything waiting
 
-Modes: 'auto' goes out immediately, 'ask' waits for Miguel to approve. A contact
-added without a flag is 'ask'. Groups are never a destination, and every message
-the agent sends carries an invisible marker so his own writing stays his.`;
+Two layers. The global mode decides who is reachable at all: 'list' (default)
+means the list and nothing else, 'ask' means anyone in your WhatsApp contacts —
+and in 'ask' every single message waits for you, with no exception. Inside
+'list', each contact's own mode decides: 'auto' goes out immediately, 'ask'
+waits. A contact added without a flag is 'ask'.
+
+Groups are never a destination, a contact set to 'off' is refused in either
+mode, and every message the agent sends carries an invisible marker so your own
+writing stays yours.`;
 
 /* ------------------------------------------------------------------ commands */
 
@@ -273,6 +284,7 @@ async function main() {
       };
       console.log(
         `whatsapp : ${words[status.connection] || status.connection}\n` +
+          `mode     : ${status.gate === 'ask' ? 'ask — every message waits for you' : 'list — only the list'}\n` +
           `contacts : ${status.contacts}\n` +
           `pending  : ${status.pending}\n` +
           `unread   : ${status.unread}\n` +
@@ -284,6 +296,24 @@ async function main() {
 
     case 'send':
       return send(options);
+
+    case 'mode': {
+      const wanted = options._[0];
+      if (!wanted) {
+        const { gate } = await call('GET', '/mode');
+        return console.log(
+          gate === 'ask'
+            ? 'ask  — anyone in your contacts can be reached, and every message waits for you'
+            : 'list — only people on the list, each with its own mode'
+        );
+      }
+      const result = await call('POST', '/mode', { gate: wanted });
+      return console.log(
+        result.gate === 'ask'
+          ? 'ask  — the agent may now reach anyone in your contacts, and you approve every message'
+          : 'list — back to the list, with a mode per contact'
+      );
+    }
 
     case 'allow':
       return allow(options);
