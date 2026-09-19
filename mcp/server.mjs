@@ -100,7 +100,9 @@ const TOOLS = [
       'has NOT been delivered — do not tell him it was sent, and do not resend it. ' +
       'In his "ask" mode anyone in his contacts is reachable and every message is queued; in ' +
       '"list" mode only people on the list are reachable, each with their own setting. ' +
-      'Never writes to groups. Check herald_status when you need to know which mode is on.',
+      'Never writes to groups. Every message is automatically signed with a visible line saying ' +
+      'it came from an assistant, so do not write "this is an AI" into the text yourself. ' +
+      'Check herald_status when you need to know which mode is on.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -152,8 +154,8 @@ const TOOLS = [
   {
     name: 'herald_status',
     description:
-      'Whether the WhatsApp session is linked, which global mode is on (list / ask), and how much ' +
-      'is waiting for his approval.',
+      'Whether the WhatsApp session is linked, which global mode is on (list / ask), how every ' +
+      'message signs off, and how much is waiting for his approval.',
     inputSchema: { type: 'object', properties: {} }
   }
 ];

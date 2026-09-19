@@ -10,7 +10,7 @@
 
 const fs = require('node:fs');
 const path = require('node:path');
-const { spawn } = require('node:child_process');
+const { spawn, execFile } = require('node:child_process');
 const QRCode = require('qrcode');
 const { home, readJson } = require('../src/core/paths.cjs');
 
@@ -99,6 +99,9 @@ function explain(body, status) {
     not_listed: `"${body.query || 'that person'}" is not on the list.\nRun: herald allow "${body.query || 'Name'}"  — or herald mode ask, to be asked instead of listing people`,
     not_in_phonebook: `"${body.query || 'that person'}" is not in your WhatsApp contacts. Herald only reaches people you have saved.`,
     bad_gate: `The mode is one of: ${(body.allowed || []).join(', ')}`,
+    empty_identity:
+      'The signature cannot be empty — every message says it came from an assistant.\n' +
+      'Give it wording instead: herald identity "IA do Miguel"',
     ambiguous: `More than one contact matches: ${(body.matches || []).join(', ')}. Use the full name.`,
     group: 'Herald never writes to groups.',
     muted: 'That contact is switched off. Run: herald allow "name" --ask',
@@ -133,10 +136,12 @@ const when = (at) => new Date(at).toLocaleString();
 const usage = `herald — send WhatsApp messages through Miguel's account, within his rules
 
   For Miguel
-    herald login                       link WhatsApp: draws the QR code here
+    herald login [--text]              link WhatsApp: opens the QR as a picture
+                                       (--text draws it here instead, for SSH)
     herald mode ask                    the agent may reach anyone in your
                                        contacts, and asks you every time
     herald mode list                   back to the list only (the default)
+    herald identity "IA do Miguel"     how it signs off to the other person
     herald allow NAME [--auto|--ask]   let the agent write to somebody
     herald deny NAME                   take them off the list
     herald pending                     what the agent wants to send
@@ -158,17 +163,35 @@ and in 'ask' every single message waits for you, with no exception. Inside
 'list', each contact's own mode decides: 'auto' goes out immediately, 'ask'
 waits. A contact added without a flag is 'ask'.
 
-Groups are never a destination, a contact set to 'off' is refused in either
-mode, and every message the agent sends carries an invisible marker so your own
-writing stays yours.`;
+Groups are never a destination, and a contact set to 'off' is refused in either
+mode.
+
+Every message the agent sends ends with a visible line saying it was written by
+an assistant — you choose the wording with 'herald identity', not whether it
+appears — plus an invisible marker, so your own writing stays distinguishable
+from the agent's inside the thread.`;
 
 /* ------------------------------------------------------------------ commands */
 
-async function login() {
+// The QR as a picture rather than as text. Terminals mangle the block
+// characters often enough — wrong font, wrong line height, a pane too narrow —
+// that a PNG is simply the reliable form. Always the same path, so refreshing
+// the code replaces the open window instead of stacking a new one.
+async function showQrImage(qr, home) {
+  const file = path.join(home, 'qr.png');
+  await QRCode.toFile(file, qr, { margin: 3, width: 520 });
+  const opener = process.platform === 'darwin' ? 'open' : 'xdg-open';
+  return new Promise((resolve) => {
+    execFile(opener, [file], () => resolve(file));
+  });
+}
+
+async function login(options = {}) {
   await ensureDaemon();
   await call('POST', '/login', {});
 
   let drawn = null;
+  let opened = false;
   const deadline = Date.now() + 180 * 1000;
   process.stdout.write('herald: asking WhatsApp for a code…\n');
 
@@ -177,6 +200,13 @@ async function login() {
 
     if (connection === 'ready') {
       console.log('\nherald: linked. You do not have to do this again.');
+      // The picture holds a live pairing code until it expires; no reason to
+      // leave it lying in the config directory.
+      fs.rmSync(path.join(home(), 'qr.png'), { force: true });
+      // Worth seeing once, right here: it is what the other person will read.
+      const identity = await call('GET', '/identity');
+      console.log(`\nMessages will end with:  — ${identity.identity}`);
+      console.log('Change the wording with: herald identity "IA do Miguel"\n');
       const { contacts } = await call('GET', '/contacts');
       if (!contacts.length) {
         console.log('Nobody is on the list yet — nothing can be sent.');
@@ -188,12 +218,22 @@ async function login() {
 
     if (qr && qr !== drawn) {
       drawn = qr;
-      // The one screen this app uses: his terminal. Small form, because the
-      // full-size block does not fit an 80-column window.
-      const art = await QRCode.toString(qr, { type: 'terminal', small: true });
-      console.log(`\n${art}`);
-      console.log('WhatsApp → Settings → Linked devices → Link a device, and scan this.');
-      console.log('The code refreshes on its own; a new one will appear here.\n');
+      if (options.text) {
+        // Still here for SSH, where opening a window is not an option. Small
+        // form, because the full-size block does not fit 80 columns.
+        const art = await QRCode.toString(qr, { type: 'terminal', small: true });
+        console.log(`\n${art}`);
+      } else {
+        const file = await showQrImage(qr, home());
+        if (!opened) {
+          opened = true;
+          console.log(`\nQR code opened: ${file}`);
+        } else {
+          console.log('herald: the code expired — the picture just refreshed.');
+        }
+      }
+      console.log('WhatsApp → Settings → Linked devices → Link a device, and scan it.');
+      console.log('The code refreshes on its own; this waits.\n');
     }
     await sleep(1500);
   }
@@ -265,7 +305,7 @@ async function main() {
 
   switch (command) {
     case 'login':
-      return login();
+      return login(options);
 
     case 'logout': {
       await call('POST', '/logout', {});
@@ -285,6 +325,7 @@ async function main() {
       console.log(
         `whatsapp : ${words[status.connection] || status.connection}\n` +
           `mode     : ${status.gate === 'ask' ? 'ask — every message waits for you' : 'list — only the list'}\n` +
+          `signs as : — ${status.identity}\n` +
           `contacts : ${status.contacts}\n` +
           `pending  : ${status.pending}\n` +
           `unread   : ${status.unread}\n` +
@@ -296,6 +337,17 @@ async function main() {
 
     case 'send':
       return send(options);
+
+    case 'identity': {
+      const wanted = options._[0];
+      if (!wanted) {
+        const current = await call('GET', '/identity');
+        console.log(`Every message the agent sends ends with:\n\n${current.example}\n`);
+        return console.log('Change it with: herald identity "IA do Miguel"');
+      }
+      const result = await call('POST', '/identity', { identity: wanted });
+      return console.log(`Messages will now end with:\n\n${result.example}`);
+    }
 
     case 'mode': {
       const wanted = options._[0];

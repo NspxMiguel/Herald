@@ -48,10 +48,25 @@ are what make that survivable:
 | **Rate limit**                         | 12 messages per hour per person, `auto` included, so a loop in the agent cannot become forty messages to somebody's father. |
 | **Reading is scoped to the same list** | Messages from anyone else are dropped before they are stored. The rest of your WhatsApp never passes through Herald.        |
 
-Every message the agent sends ends with two invisible characters (U+3164). They
-render as nothing, Unicode treats them as letters so trimming never eats them,
-and they are what tells your own writing apart from the agent's — in the thread
-itself, months later.
+## Two signatures, answering different questions
+
+Every message the agent sends ends with a **visible** line saying it was written
+by an assistant. Somebody answering a question about a server at eleven at night
+deserves to know who is asking. You choose its wording — not whether it appears:
+
+```bash
+herald identity "IA do Miguel"
+```
+
+```
+can you open TCP 8793 on the VPS?
+— IA do Miguel
+```
+
+And with two **invisible** characters (U+3164). They render as nothing, Unicode
+treats them as letters so trimming never eats them, and they are what tells your
+own writing apart from the agent's — in a thread where both arrive from the same
+number, months later.
 
 ## Install
 

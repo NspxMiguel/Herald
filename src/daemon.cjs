@@ -30,6 +30,9 @@ const defaults = {
   // 'list' keeps to the allow-list; 'ask' lets the agent reach anybody in his
   // address book and makes every message wait for him. See core/rules.cjs.
   gate: rules.DEFAULT_GATE,
+  // The visible line that tells the person reading that this is software. Always
+  // present; only its wording is the owner's to choose.
+  identity: '',
   port: DEFAULT_PORT,
   token: '',
   notify: true
@@ -61,6 +64,7 @@ function load() {
     ...defaults,
     ...saved,
     gate: rules.normalizeGate(saved.gate),
+    identity: signature.normalizeLabel(saved.identity),
     contacts: (saved.contacts || []).map((contact) => ({
       ...contact,
       mode: rules.normalizeMode(contact.mode)
@@ -177,7 +181,7 @@ async function sendAndConfirm(chatId, text) {
 
 async function deliver(contact, text) {
   const chatId = await resolveChatId(contact);
-  const sent = await sendAndConfirm(chatId, signature.sign(text));
+  const sent = await sendAndConfirm(chatId, signature.sign(text, settings.identity));
   const key = contactId.userPartOf(contact.phone || contact.waId);
   sendLog[key] = [...(sendLog[key] || []), Date.now()].filter(
     (time) => Date.now() - time < rules.RATE_WINDOW_MS
@@ -190,14 +194,24 @@ function phoneBook() {
     const unique = new Map();
     for (const contact of contacts) {
       if (!contact.isMyContact || contact.isMe || contact.isGroup || contact.isBlocked) continue;
-      if (!contactId.isPersonId(contact.id?._serialized)) continue;
-      const phone = contactId.userPartOf(contact.number || contact.id?.user);
+      const waId = contact.id?._serialized || '';
+      if (!contactId.isPersonId(waId)) continue;
+
+      // Since the LID migration, getContacts() returns the same person twice:
+      // same serialized id, but `number` carrying the phone on one entry and the
+      // LID number on the other. Measured on this account, 19/09/2026: 60 of 125
+      // contacts came back duplicated, so searching a name found two matches and
+      // refused to send to either. The serialized id is the thing that actually
+      // addresses a chat, so it decides identity here, and for a @c.us id its
+      // own user part is the phone number — `number` is not to be trusted.
+      const phone = waId.endsWith('@c.us')
+        ? contactId.userPartOf(waId)
+        : contactId.userPartOf(contact.number);
       const name = String(contact.name || contact.pushname || '').trim();
       // Service accounts, short codes and broadcast ids are not people.
       if (!name || phone.length < 8 || phone.length > 15) continue;
-      const key = contactId.looseKey(phone) || phone;
-      if (unique.has(key)) continue;
-      unique.set(key, { waId: contact.id._serialized, phone, name });
+      if (unique.has(waId)) continue;
+      unique.set(waId, { waId, phone, name });
     }
     return [...unique.values()].sort((a, b) => a.name.localeCompare(b.name));
   });
@@ -387,7 +401,9 @@ async function readThread({ to, limit = 30 }) {
         // A message he typed himself and one Herald sent for him both come back
         // as fromMe; the marker is the only thing that tells them apart.
         byAgent: message.fromMe ? signature.isSigned(message.body || '') : false,
-        text: signature.strip(message.body || ''),
+        text: signature.isSigned(message.body || '')
+          ? signature.readable(message.body || '')
+          : signature.strip(message.body || ''),
         hasMedia: Boolean(message.hasMedia)
       }))
     }
@@ -470,6 +486,7 @@ const routes = {
     body: {
       connection: state.connection,
       gate: rules.normalizeGate(settings.gate),
+      identity: signature.normalizeLabel(settings.identity),
       contacts: settings.contacts.length,
       pending: state.pending.length,
       unread: state.inbox.filter((item) => !item.read).length,
@@ -502,6 +519,28 @@ const routes = {
   },
 
   'GET /mode': async () => ({ body: { gate: rules.normalizeGate(settings.gate) } }),
+
+  'GET /identity': async () => ({
+    body: {
+      identity: signature.normalizeLabel(settings.identity),
+      example: signature.sign('…', settings.identity).replace(signature.MARKER, '')
+    }
+  }),
+
+  // Only the wording changes here. There is no route that removes the line,
+  // because "always identifies itself" was the requirement, not a default.
+  'POST /identity': async ({ identity }) => {
+    const wanted = String(identity ?? '').trim();
+    if (!wanted) return { status: 400, body: { error: 'empty_identity' } };
+    settings.identity = signature.normalizeLabel(wanted);
+    save();
+    return {
+      body: {
+        identity: settings.identity,
+        example: signature.sign('…', settings.identity).replace(signature.MARKER, '')
+      }
+    };
+  },
 
   'POST /mode': async ({ gate }) => {
     if (!rules.GATES.includes(String(gate ?? '').toLowerCase())) {
