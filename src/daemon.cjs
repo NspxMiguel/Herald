@@ -451,11 +451,22 @@ async function decidePending({ id, action, always = false, by = 'owner' }) {
 // made: ask WhatsApp who sent this. Done once per contact and written down, so
 // the next message from them matches without a lookup.
 async function linkLid(message) {
+  // Asking WhatsApp who sent this is the only way to tell whether a @lid belongs
+  // to somebody on the list — the id itself says nothing. But that question is
+  // about a person who may not be on the list, so it is only worth asking while
+  // there is still a listed contact whose @lid is unknown. Once every one of
+  // them is linked, an unrecognised @lid is a stranger by elimination and no
+  // lookup happens at all: the steady state asks nothing about anybody.
+  const unlinked = settings.contacts.filter((contact) => !contact.lid);
+  if (!unlinked.length) return null;
+
   try {
     const who = await message.getContact();
     const number = who?.number || who?.id?.user || '';
     if (!number) return null;
-    const contact = contactId.findContact(settings.contacts, number);
+    // Matched against the unlinked ones only: a listed contact that already has
+    // its @lid must not have it quietly replaced by another one.
+    const contact = contactId.findContact(unlinked, number);
     if (!contact) return null;
     contact.lid = message.from;
     save();

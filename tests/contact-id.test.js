@@ -82,3 +82,11 @@ test('a linked lid does not make that contact answer for somebody else', () => {
   // and the phone still matches on the normal server
   expect(contactId.matchesContact(linked, '554792078506@c.us')).toBe(true);
 });
+
+// The reading scope is the list and nothing else. A lid that resolves to
+// somebody who is not on it must match nobody, however it is dressed.
+test('a lid belonging to a stranger matches nobody on the list', () => {
+  const list = [{ id: 'd', name: 'Davi', phone: '554792078506', lid: '220301992398854@lid' }];
+  expect(contactId.findContact(list, '777777777777@lid')).toBeUndefined();
+  expect(contactId.findContact(list, '5511999998888@c.us')).toBeUndefined();
+});
