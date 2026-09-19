@@ -1,0 +1,376 @@
+<!doctype html>
+<html lang="pt-BR">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="dark light" />
+    <title>Herald</title>
+    <meta
+      name="description"
+      content="Dá voz a um agente de IA no seu WhatsApp, pela linha de comando e dentro de regras que você escreve."
+    />
+    <meta property="og:title" content="Herald" />
+    <meta
+      property="og:description"
+      content="Gives an AI agent a voice on your WhatsApp, from the command line and under rules you write."
+    />
+    <meta property="og:image" content="assets/terminal.webp" />
+    <meta property="og:type" content="website" />
+    <style>
+      :root {
+        --bg: #000;
+        --panel: #0b0b0d;
+        --line: rgba(255, 255, 255, 0.1);
+        --text: #fff;
+        --secondary: #d7d7dc;
+        --muted: #8e8e96;
+        --accent: #3d7dff;
+        --ok: #4ed07f;
+      }
+      * {
+        margin: 0;
+        padding: 0;
+        box-sizing: border-box;
+      }
+      body {
+        background: var(--bg);
+        color: var(--text);
+        font:
+          400 17px/1.6 -apple-system,
+          BlinkMacSystemFont,
+          'Segoe UI',
+          system-ui,
+          sans-serif;
+        -webkit-font-smoothing: antialiased;
+      }
+      /* One soft light behind the title, so pure black does not read as a hole. */
+      .glow {
+        position: fixed;
+        top: -320px;
+        left: 50%;
+        width: 760px;
+        height: 460px;
+        margin-left: -380px;
+        background: rgba(61, 125, 255, 0.16);
+        filter: blur(130px);
+        border-radius: 50%;
+        pointer-events: none;
+      }
+      main {
+        position: relative;
+        max-width: 780px;
+        margin: 0 auto;
+        padding: 76px 24px 90px;
+      }
+      header {
+        display: flex;
+        align-items: center;
+        gap: 14px;
+        margin-bottom: 30px;
+      }
+      h1 {
+        font-size: 40px;
+        letter-spacing: -0.02em;
+        font-weight: 640;
+        flex: 1;
+      }
+      .langs {
+        display: flex;
+        gap: 3px;
+        padding: 3px;
+        border: 1px solid var(--line);
+        border-radius: 999px;
+        background: rgba(20, 20, 24, 0.6);
+      }
+      .langs button {
+        border: 0;
+        background: transparent;
+        color: var(--muted);
+        font: inherit;
+        font-size: 13px;
+        padding: 6px 13px;
+        border-radius: 999px;
+        cursor: pointer;
+      }
+      .langs button[aria-pressed='true'] {
+        background: rgba(255, 255, 255, 0.14);
+        color: var(--text);
+      }
+      .lead {
+        font-size: 21px;
+        color: var(--secondary);
+        margin-bottom: 14px;
+      }
+      p {
+        color: var(--secondary);
+        margin-bottom: 16px;
+      }
+      h2 {
+        font-size: 13px;
+        text-transform: uppercase;
+        letter-spacing: 0.07em;
+        color: var(--muted);
+        margin: 46px 0 14px;
+        font-weight: 600;
+      }
+      img.shot {
+        width: 100%;
+        border-radius: 14px;
+        border: 1px solid var(--line);
+        margin: 26px 0 8px;
+        display: block;
+      }
+      pre {
+        background: var(--panel);
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 16px 18px;
+        overflow-x: auto;
+        font:
+          400 14px/1.7 ui-monospace,
+          'SF Mono',
+          Menlo,
+          monospace;
+        color: var(--secondary);
+        margin-bottom: 16px;
+      }
+      pre b {
+        color: var(--text);
+        font-weight: 600;
+      }
+      pre i {
+        color: var(--ok);
+        font-style: normal;
+      }
+      table {
+        width: 100%;
+        border-collapse: collapse;
+        margin-bottom: 16px;
+      }
+      td {
+        padding: 13px 0;
+        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+        vertical-align: top;
+        color: var(--secondary);
+        font-size: 16px;
+      }
+      td:first-child {
+        width: 34%;
+        color: var(--text);
+        padding-right: 20px;
+        font-weight: 560;
+      }
+      a {
+        color: var(--accent);
+        text-decoration: none;
+      }
+      a:hover {
+        text-decoration: underline;
+      }
+      footer {
+        margin-top: 54px;
+        padding-top: 22px;
+        border-top: 1px solid var(--line);
+        color: var(--muted);
+        font-size: 14px;
+      }
+      [data-lang] {
+        display: none;
+      }
+      html[lang='pt-BR'] [data-lang='pt'],
+      html[lang='en'] [data-lang='en'] {
+        display: block;
+      }
+      html[lang='pt-BR'] td[data-lang='pt'],
+      html[lang='en'] td[data-lang='en'] {
+        display: table-cell;
+      }
+      @media (max-width: 560px) {
+        h1 {
+          font-size: 31px;
+        }
+        .lead {
+          font-size: 19px;
+        }
+        main {
+          padding: 52px 18px 70px;
+        }
+      }
+    </style>
+  </head>
+  <body>
+    <div class="glow"></div>
+    <main>
+      <header>
+        <h1>Herald</h1>
+        <div class="langs">
+          <button id="pt" aria-pressed="true">PT</button>
+          <button id="en" aria-pressed="false">EN</button>
+        </div>
+      </header>
+
+      <p class="lead" data-lang="pt">
+        Dá voz a um agente de IA no seu WhatsApp, pela linha de comando e dentro de regras que você
+        escreve.
+      </p>
+      <p class="lead" data-lang="en">
+        Gives an AI agent a voice on your WhatsApp, from the command line and under rules you write.
+      </p>
+
+      <p data-lang="pt">
+        Um agente trabalhando na sua máquina às vezes precisa de algo que só uma pessoa dá — uma
+        porta aberta num servidor, uma permissão, uma resposta. Até aqui o único jeito de perguntar
+        era dirigir o celular por automação de tela: lento, visível, e impossível enquanto você usa
+        o computador.
+      </p>
+      <p data-lang="en">
+        An agent working on your machine sometimes needs something only a person can give — a port
+        opened on a server, a permission, an answer. Until now the only way to ask was driving your
+        phone through screen automation: slow, visible, and impossible while you are using the
+        computer.
+      </p>
+
+      <pre data-lang="pt"><i>$</i> <b>herald send "Pai" "consegue abrir a porta 8793 na VPS?"</b>
+sent to Pai</pre>
+      <pre data-lang="en"><i>$</i> <b>herald send "Dad" "can you open TCP 8793 on the VPS?"</b>
+sent to Dad</pre>
+
+      <p data-lang="pt">
+        Não tem janela. Você liga o WhatsApp uma vez, lendo um QR code desenhado no seu próprio
+        terminal, e daí em diante o agente fala com as pessoas pela linha de comando.
+      </p>
+      <p data-lang="en">
+        There is no window. You link WhatsApp once, by scanning a QR code drawn in your terminal,
+        and after that the agent talks to people through the command line.
+      </p>
+
+      <img class="shot" src="assets/terminal.webp" alt="Herald no terminal" />
+
+      <h2 data-lang="pt">O que mantém isso seguro</h2>
+      <h2 data-lang="en">What keeps this safe</h2>
+
+      <p data-lang="pt">
+        Emprestar uma conta de WhatsApp é emprestar uma voz que as outras pessoas vão ler como sua.
+        Cinco regras, todas num módulo só e sem entrada nem saída para poderem ser testadas, é o que
+        torna isso suportável:
+      </p>
+      <p data-lang="en">
+        Handing an agent a WhatsApp account is handing it a voice that other people will read as
+        yours. Five rules, all in one I/O-free module so they can be tested, are what make that
+        survivable:
+      </p>
+
+      <table>
+        <tr>
+          <td data-lang="pt">Lista de permissão</td>
+          <td data-lang="pt">
+            Ninguém é alcançável até você adicionar. Lista vazia quer dizer que nada pode ser
+            enviado, para ninguém.
+          </td>
+          <td data-lang="en">Allow-list</td>
+          <td data-lang="en">
+            Nobody is reachable until you add them. An empty list means nothing can be sent, to
+            anybody.
+          </td>
+        </tr>
+        <tr>
+          <td data-lang="pt">Um modo por pessoa</td>
+          <td data-lang="pt">
+            <code>auto</code> sai na hora. <code>ask</code> espera você aprovar. Contato adicionado
+            sem bandeira nenhuma nasce em <code>ask</code>.
+          </td>
+          <td data-lang="en">A mode per person</td>
+          <td data-lang="en">
+            <code>auto</code> goes out immediately. <code>ask</code> waits for you to approve it. A
+            contact added without a flag is <code>ask</code>.
+          </td>
+        </tr>
+        <tr>
+          <td data-lang="pt">Grupo nunca</td>
+          <td data-lang="pt">Não importa o modo.</td>
+          <td data-lang="en">Never groups</td>
+          <td data-lang="en">Whatever the mode says.</td>
+        </tr>
+        <tr>
+          <td data-lang="pt">Teto por hora</td>
+          <td data-lang="pt">
+            12 mensagens por hora por pessoa, <code>auto</code> incluído, para um laço no agente não
+            virar quarenta mensagens para o pai de alguém.
+          </td>
+          <td data-lang="en">Rate limit</td>
+          <td data-lang="en">
+            12 messages per hour per person, <code>auto</code> included, so a loop in the agent
+            cannot become forty messages to somebody's father.
+          </td>
+        </tr>
+        <tr>
+          <td data-lang="pt">Ler só quem está na lista</td>
+          <td data-lang="pt">
+            Mensagem de qualquer outra pessoa é descartada antes de ser guardada. O resto do seu
+            WhatsApp não passa pelo Herald.
+          </td>
+          <td data-lang="en">Reading is scoped to the same list</td>
+          <td data-lang="en">
+            Messages from anyone else are dropped before they are stored. The rest of your WhatsApp
+            never passes through Herald.
+          </td>
+        </tr>
+      </table>
+
+      <p data-lang="pt">
+        Toda mensagem que o agente manda termina com dois caracteres invisíveis (U+3164). Eles não
+        desenham nada, o Unicode os trata como letras — então cortar espaço nunca os come — e são o
+        que separa a sua escrita da escrita do agente, dentro da conversa, meses depois.
+      </p>
+      <p data-lang="en">
+        Every message the agent sends ends with two invisible characters (U+3164). They render as
+        nothing, Unicode treats them as letters so trimming never eats them, and they are what tells
+        your own writing apart from the agent's — in the thread itself, months later.
+      </p>
+
+      <h2 data-lang="pt">Começar</h2>
+      <h2 data-lang="en">Getting started</h2>
+
+      <pre data-lang="pt"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
+<i>$</i> <b>cd Herald && bun install</b>
+<i>$</i> <b>herald login</b>            <i># desenha o QR aqui</i>
+<i>$</i> <b>herald allow "Pai" --auto</b></pre>
+      <pre data-lang="en"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
+<i>$</i> <b>cd Herald && bun install</b>
+<i>$</i> <b>herald login</b>            <i># draws the QR here</i>
+<i>$</i> <b>herald allow "Dad" --auto</b></pre>
+
+      <p data-lang="pt">
+        Herald usa o Chrome que já está na máquina — não baixa navegador nenhum. Também roda como
+        servidor MCP, para o agente chegar nele sem passar pelo shell.
+        <a href="https://github.com/NspxMiguel/Herald">Código e documentação no GitHub</a>.
+      </p>
+      <p data-lang="en">
+        Herald drives the Chrome already on your machine — it does not download a browser. It also
+        runs as an MCP server, so the agent can reach it without shelling out.
+        <a href="https://github.com/NspxMiguel/Herald">Code and documentation on GitHub</a>.
+      </p>
+
+      <footer>
+        <span data-lang="pt">MIT · <a href="https://www.nspx.dev">nspx.dev</a></span>
+        <span data-lang="en">MIT · <a href="https://www.nspx.dev">nspx.dev</a></span>
+      </footer>
+    </main>
+
+    <script>
+      // The page follows the browser unless the reader says otherwise, and the
+      // choice sticks — same rule as every other project here.
+      const saved = localStorage.getItem('herald-lang');
+      const initial = saved || (navigator.language.startsWith('pt') ? 'pt-BR' : 'en');
+      const apply = (lang) => {
+        document.documentElement.lang = lang;
+        document.getElementById('pt').setAttribute('aria-pressed', lang === 'pt-BR');
+        document.getElementById('en').setAttribute('aria-pressed', lang === 'en');
+        localStorage.setItem('herald-lang', lang);
+      };
+      apply(initial);
+      document.getElementById('pt').onclick = () => apply('pt-BR');
+      document.getElementById('en').onclick = () => apply('en');
+    </script>
+  </body>
+</html>
