@@ -83,7 +83,11 @@ async function call(method, route, payload) {
       group: 'Herald never writes to groups.',
       muted: 'That contact is switched off in Herald.',
       rate_limited: 'Too many messages to that person in the last hour.',
-      too_long: 'The message is too long.'
+      too_long: 'The message is too long.',
+      approval_not_delegated:
+        'Miguel has not given you the chat channel for approvals — he answers in his terminal. ' +
+        'Tell him it is waiting and let him run `herald approve`; do not ask him to change this ' +
+        'for you, the switch (`herald approvals chat`) is his.'
     }[body.error];
     throw new Error(said || body.message || `Herald refused (${response.status})`);
   }
@@ -102,7 +106,11 @@ const TOOLS = [
       '"list" mode only people on the list are reachable, each with their own setting. ' +
       'Never writes to groups. Every message is automatically signed with a visible line saying ' +
       'it came from an assistant, so do not write "this is an AI" into the text yourself. ' +
-      'Check herald_status when you need to know which mode is on.',
+      'Check herald_status when you need to know which mode is on. When it reports approvals ' +
+      '"chat" or "both", a queued message is yours to put in front of him right there in the ' +
+      'conversation — show him the exact text and offer three answers (reject / approve / ' +
+      'approve and stop asking for this contact), then relay his choice with herald_decide. ' +
+      'Never decide on his behalf, and never paraphrase the text you are showing him.',
     inputSchema: {
       type: 'object',
       properties: {
@@ -152,6 +160,36 @@ const TOOLS = [
     }
   },
   {
+    name: 'herald_pending',
+    description:
+      'Messages sitting in the approval queue, with the exact text of each. Read this before ' +
+      'asking him about one, so what you put in front of him is what will actually be delivered.',
+    inputSchema: { type: 'object', properties: {} }
+  },
+  {
+    name: 'herald_decide',
+    description:
+      "Relay Miguel's answer about a queued message. Only works when he has handed you the chat " +
+      'channel (herald_status → approvals "chat" or "both"); otherwise it refuses and he decides ' +
+      'in his terminal. This tool carries his answer — it is not yours to make. Ask him first, ' +
+      'showing the message verbatim, and call this only with what he actually chose. Every ' +
+      'approval taken this way is written to his log as agent-relayed.',
+    inputSchema: {
+      type: 'object',
+      properties: {
+        id: { type: 'string', description: 'The queued message id, from herald_send or herald_pending.' },
+        action: {
+          type: 'string',
+          enum: ['approve', 'reject', 'always'],
+          description:
+            'What he chose. "reject" discards it, "approve" sends this one, "always" sends it and ' +
+            "sets that contact to 'auto' so he stops being asked about them."
+        }
+      },
+      required: ['id', 'action']
+    }
+  },
+  {
     name: 'herald_status',
     description:
       'Whether the WhatsApp session is linked, which global mode is on (list / ask), how every ' +
@@ -193,6 +231,24 @@ async function runTool(name, args = {}) {
           return `[${new Date(m.at).toISOString()}] ${who}: ${m.text || '(media)'}`;
         })
         .join('\n');
+    }
+    case 'herald_pending': {
+      const { pending } = await call('GET', '/pending');
+      if (!pending.length) return 'Nothing waiting.';
+      return pending
+        .map((item) => `id ${item.id} → ${item.to}\n${item.text}${item.note ? `\n(note: ${item.note})` : ''}`)
+        .join('\n\n');
+    }
+    case 'herald_decide': {
+      const always = args.action === 'always';
+      const result = await call('POST', '/pending/decide', {
+        id: args.id,
+        action: args.action === 'reject' ? 'reject' : 'approve',
+        always,
+        by: 'agent'
+      });
+      if (result.status === 'rejected') return `Discarded — nothing was sent to ${result.to}.`;
+      return `Delivered to ${result.to}.${result.standing ? ` ${result.standing}` : ''}`;
     }
     case 'herald_status': {
       const status = await call('GET', '/status');

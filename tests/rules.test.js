@@ -73,8 +73,18 @@ test('a phone number reaches a listed contact, and only a listed one', () => {
   expect(rules.resolveTarget(people, '5511911112222').error).toBe('not_listed');
 });
 
-test('the global ask mode makes even an auto contact wait', () => {
+// Changed deliberately: this used to assert the opposite. Under 'ask' an 'auto'
+// contact was still queued, which meant answering "always, stop asking me about
+// this person" did nothing and the next message asked again. A standing answer
+// the owner gave by name is a decision, not a gap in the guard.
+test('a standing auto answer holds under the global ask mode too', () => {
   const decision = rules.decideSend({ contacts: people, target: 'Pai', text: 'oi', gate: 'ask' });
+  expect(decision.allowed).toBe(true);
+  expect(decision.delivery).toBe('sent');
+});
+
+test('ask mode still queues everyone the owner has not answered for', () => {
+  const decision = rules.decideSend({ contacts: people, target: 'Ana', text: 'oi', gate: 'ask' });
   expect(decision.allowed).toBe(true);
   expect(decision.delivery).toBe('pending');
 });
@@ -127,4 +137,24 @@ test('groups are refused in ask mode too', () => {
       contact: guest
     }).reason
   ).toBe('group');
+});
+
+test('approvals default to the terminal, so the agent cannot decide on its own', () => {
+  expect(rules.DEFAULT_APPROVALS).toBe('mac');
+  expect(rules.agentMayDecide(undefined)).toBe(false);
+  expect(rules.agentMayDecide('mac')).toBe(false);
+});
+
+test('an unreadable approvals value falls back to the closed choice, never the open one', () => {
+  for (const junk of ['', null, 'yes', 'agent', 42, {}]) {
+    expect(rules.normalizeApprovals(junk)).toBe('mac');
+  }
+  // Only wording the owner could plausibly have typed is honoured.
+  expect(rules.normalizeApprovals('  CHAT ')).toBe('chat');
+});
+
+test('only the two delegating choices open the channel to the agent', () => {
+  expect(rules.agentMayDecide('chat')).toBe(true);
+  expect(rules.agentMayDecide('both')).toBe(true);
+  expect(rules.APPROVALS).toEqual(['mac', 'chat', 'both']);
 });

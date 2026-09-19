@@ -18,10 +18,17 @@
 // work the owner should not have to do up front:
 //
 //   'list' (default)  the five rules exactly as written above;
-//   'ask'             anyone in his WhatsApp address book is a valid target and
-//                     every single message waits for him — including messages to
-//                     contacts he marked 'auto'. A mode with a hidden exception
-//                     is not a guard, it is a trap, so this one has none.
+//   'ask'             anyone in his WhatsApp address book is a valid target, and
+//                     every message waits for him unless he has already said
+//                     otherwise about that one person.
+//
+// That last clause is the only exception in the whole file, and it is not a
+// hidden one: the single way a contact reaches 'auto' is the owner putting them
+// there, either with `herald allow NAME --auto` or by answering "and stop asking
+// me about this one" to a waiting message. `herald contacts` lists who is on it.
+// An exception he granted by name, and can see, is a decision; what rule 2 above
+// guards against is an exception he never made. Asking again after he has
+// answered "always" is not caution, it is ignoring him.
 
 const contactId = require('./contact-id.cjs');
 
@@ -30,6 +37,21 @@ const DEFAULT_MODE = 'ask';
 
 const GATES = ['list', 'ask'];
 const DEFAULT_GATE = 'list';
+
+// Where the owner answers when a message is waiting. This is about the channel
+// he uses, not about whether he is asked: every rule above still holds.
+//
+//   'mac' (default)  the notification and `herald approve` in his terminal. The
+//                    agent has no way to decide — the two sides are separate
+//                    programs, which is what makes the queue a real gate.
+//   'chat'           he answers inside the conversation he is already having
+//                    with the agent, and the agent relays that answer. The gate
+//                    is then only as strong as the agent showing him the real
+//                    text, so this is opt-in, never the default, and every
+//                    approval taken this way is written to the log as such.
+//   'both'           either channel decides, whichever he reaches first.
+const APPROVALS = ['mac', 'chat', 'both'];
+const DEFAULT_APPROVALS = 'mac';
 
 // Per contact, per hour. Chosen to be comfortably above any honest use (a
 // question, a follow-up, a thank-you) and far below anything that reads as a
@@ -51,6 +73,21 @@ function normalizeGate(value) {
     .trim()
     .toLowerCase();
   return GATES.includes(gate) ? gate : DEFAULT_GATE;
+}
+
+function normalizeApprovals(value) {
+  const choice = String(value ?? '')
+    .trim()
+    .toLowerCase();
+  return APPROVALS.includes(choice) ? choice : DEFAULT_APPROVALS;
+}
+
+// Asked of every decision that did not come from the owner's own terminal. The
+// default answer is no: delegating the queue is something he turns on, not
+// something an agent can arrange for itself.
+function agentMayDecide(approvals) {
+  const choice = normalizeApprovals(approvals);
+  return choice === 'chat' || choice === 'both';
 }
 
 // The agent addresses people the way the owner does: by name. Exact match first,
@@ -124,13 +161,14 @@ function decideSend({ contacts, target, text, log = {}, now = Date.now(), gate, 
     };
   }
 
-  const asking = normalizeGate(gate) === 'ask';
+  // 'auto' is the owner's standing answer about this person, and it holds under
+  // either gate. Everything else waits.
   return {
     allowed: true,
     contact,
     mode,
     gate: normalizeGate(gate),
-    delivery: !asking && mode === 'auto' ? 'sent' : 'pending'
+    delivery: mode === 'auto' ? 'sent' : 'pending'
   };
 }
 
@@ -140,6 +178,10 @@ module.exports = {
   GATES,
   DEFAULT_GATE,
   normalizeGate,
+  APPROVALS,
+  DEFAULT_APPROVALS,
+  normalizeApprovals,
+  agentMayDecide,
   RATE_WINDOW_MS,
   RATE_MAX_PER_WINDOW,
   MAX_MESSAGE_LENGTH,

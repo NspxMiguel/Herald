@@ -30,6 +30,9 @@ const defaults = {
   // 'list' keeps to the allow-list; 'ask' lets the agent reach anybody in his
   // address book and makes every message wait for him. See core/rules.cjs.
   gate: rules.DEFAULT_GATE,
+  // Which channel he answers the queue on. See core/rules.cjs — 'mac' keeps the
+  // decision in his terminal, where the agent cannot reach it.
+  approvals: rules.DEFAULT_APPROVALS,
   // The visible line that tells the person reading that this is software. Always
   // present; only its wording is the owner's to choose.
   identity: '',
@@ -64,6 +67,7 @@ function load() {
     ...defaults,
     ...saved,
     gate: rules.normalizeGate(saved.gate),
+    approvals: rules.normalizeApprovals(saved.approvals),
     identity: signature.normalizeLabel(saved.identity),
     contacts: (saved.contacts || []).map((contact) => ({
       ...contact,
@@ -169,14 +173,37 @@ async function resolveMissingContactIds() {
 // whatsapp-web.js can resolve sendMessage with an empty result when WhatsApp Web
 // moves under it: no error, no message, and the daemon would happily report a
 // send that never happened. Nothing counts as sent without an id back.
+// Whether a send worked is decided by sendMessage resolving, not by what it
+// resolves to. Measured against a real account on 19/09/2026: six consecutive
+// sends all arrived, and every one of them resolved with undefined. On this
+// WhatsApp Web build the library's whole feedback layer is gone — sendMessage
+// describes nothing, chat.fetchMessages throws, and message_create never fires —
+// while the send itself works every time.
+//
+// Treating undefined as failure was therefore wrong, and not harmlessly wrong:
+// the caller put each "failed" message back on the queue and a real person got
+// the same text three times. Between reporting a delivered message as failed and
+// reporting a failed one as delivered, only the first is proven to happen here,
+// and only the first spams somebody. So a throw is the failure, and anything
+// else is a send.
 async function sendAndConfirm(chatId, text) {
   const sent = await client.sendMessage(chatId, text);
-  if (!sent?.id?._serialized) {
-    throw new Error(
-      'WhatsApp accepted nothing back: the message was not sent. This build of WhatsApp Web is ahead of the library.'
-    );
-  }
-  return sent;
+  if (sent?.id?._serialized) return sent;
+  // No id to record. The send still happened; the log says so rather than
+  // pretending to an id that this build did not hand back.
+  console.log(`herald: sent, but this build described it as ${describe(sent)} — no message id`);
+  return { id: { _serialized: '' } };
+}
+
+// Enough of an unknown value to tell those two cases apart, and never the
+// message body: this line goes to a log file.
+function describe(value) {
+  if (value === undefined) return 'undefined';
+  if (value === null) return 'null';
+  if (typeof value !== 'object') return `${typeof value} ${JSON.stringify(value)}`;
+  const keys = Object.keys(value);
+  const id = value.id ? `id:{${Object.keys(value.id).join(',')}}` : 'no id';
+  return `object keys:[${keys.join(',')}] ${id}`;
 }
 
 async function deliver(contact, text) {
@@ -309,24 +336,65 @@ async function requestSend({ to, text, note, origin = 'agent' }) {
   };
   state.pending.unshift(item);
   record({ kind: 'queued', contactId: contact.id, name: contact.name, text: body });
-  notify(`Herald → ${contact.name}`, `${body.slice(0, 120)}\nherald approve ${item.id}`);
+  // He gets the notification whichever channel he answers on: a message waiting
+  // in a chat he has closed would otherwise wait forever, and a receipt on his
+  // screen is also how a chat approval stays impossible to miss.
+  const how =
+    rules.normalizeApprovals(settings.approvals) === 'chat'
+      ? 'waiting for you in the chat'
+      : `herald approve ${item.id}`;
+  notify(`Herald → ${contact.name}`, `${body.slice(0, 120)}\n${how}`);
   return { body: { status: 'pending', id: item.id, to: contact.name } };
 }
 
-async function decidePending({ id, action }) {
+async function decidePending({ id, action, always = false, by = 'owner' }) {
+  // A decision relayed by the agent only counts when he delegated that channel.
+  // Checked before the item is pulled off the queue, so a refusal leaves the
+  // message exactly where it was.
+  if (by === 'agent' && !rules.agentMayDecide(settings.approvals)) {
+    return {
+      status: 403,
+      body: { error: 'approval_not_delegated', approvals: rules.normalizeApprovals(settings.approvals) }
+    };
+  }
+
   const item = state.pending.find((candidate) => candidate.id === id);
   if (!item) return { status: 404, body: { error: 'unknown_request' } };
   state.pending = state.pending.filter((candidate) => candidate.id !== id);
 
   if (action !== 'approve') {
-    record({ kind: 'rejected', contactId: item.contactId, name: item.name, text: item.text });
-    return { body: { status: 'rejected', id, to: item.name } };
+    record({ kind: 'rejected', contactId: item.contactId, name: item.name, text: item.text, by });
+    return { body: { status: 'rejected', id, to: item.name, by } };
   }
 
   const contact =
     settings.contacts.find((candidate) => candidate.id === item.contactId) || item.contact;
-  if (!contact) return { status: 404, body: { error: 'not_listed' } };
-  const sent = await deliver(contact, item.text);
+  if (!contact) {
+    state.pending.unshift(item);
+    return { status: 404, body: { error: 'not_listed' } };
+  }
+
+  // The item came off the queue above so that two approvals cannot send it
+  // twice. If the delivery then fails, that removal has to be undone: an
+  // approval that evaporates is worse than one that is refused, because he
+  // believes the message went out and there is nothing left to retry.
+  let sent;
+  try {
+    sent = await deliver(contact, item.text);
+  } catch (error) {
+    state.pending.unshift(item);
+    record({
+      kind: 'failed',
+      contactId: contact.id,
+      name: contact.name,
+      text: item.text,
+      error: error.message
+    });
+    return {
+      status: 502,
+      body: { error: 'delivery_failed', message: error.message, id: item.id, to: contact.name }
+    };
+  }
 
   // Approving a message to somebody off the list opens that conversation: their
   // reply has to reach the agent, otherwise it asked a question it can never
@@ -345,9 +413,33 @@ async function decidePending({ id, action }) {
     name: contact.name,
     text: item.text,
     approved: true,
-    waMessageId: sent.id._serialized
+    // Written down so `herald log` can always answer "who let this one out" —
+    // the point of allowing the chat channel is transparency, not trust.
+    by,
+    always: always || undefined,
+    waMessageId: sent.id._serialized || ''
   });
-  return { body: { status: 'sent', id, to: contact.name } };
+
+  // "and stop asking me about this one" — the contact goes to 'auto'. It is the
+  // same switch as `herald allow NAME --auto`, reached from the answer instead
+  // of from a second command.
+  let standing = null;
+  if (always) {
+    const stored = settings.contacts.find((entry) => entry.id === contact.id);
+    if (stored) stored.mode = 'auto';
+    save();
+    // The global 'ask' mode queues everything, with no per-contact exception —
+    // that is written into rules.cjs on purpose. Saying "always" while it is on
+    // therefore changes nothing today, and pretending otherwise would be the
+    // trap that mode exists to avoid. So it is said out loud instead.
+    standing =
+      rules.normalizeGate(settings.gate) === 'ask'
+        ? `${contact.name} is now 'auto', but your global mode is 'ask', which queues every ` +
+          "message with no exception — so this one will still wait. Run: herald mode list"
+        : `${contact.name} is now 'auto' — messages go out without asking you.`;
+  }
+
+  return { body: { status: 'sent', id, to: contact.name, by, standing } };
 }
 
 /* ---------------------------------------------------------------- receiving */
@@ -486,6 +578,7 @@ const routes = {
     body: {
       connection: state.connection,
       gate: rules.normalizeGate(settings.gate),
+      approvals: rules.normalizeApprovals(settings.approvals),
       identity: signature.normalizeLabel(settings.identity),
       contacts: settings.contacts.length,
       pending: state.pending.length,
@@ -540,6 +633,22 @@ const routes = {
         example: signature.sign('…', settings.identity).replace(signature.MARKER, '')
       }
     };
+  },
+
+  'GET /approvals': async () => ({
+    body: { approvals: rules.normalizeApprovals(settings.approvals), allowed: rules.APPROVALS }
+  }),
+
+  // Only ever reachable from the owner's own terminal: the agent has no tool
+  // that maps here, so it cannot widen its own permission.
+  'POST /approvals': async ({ approvals }) => {
+    const wanted = String(approvals ?? '').toLowerCase();
+    if (!rules.APPROVALS.includes(wanted)) {
+      return { status: 400, body: { error: 'bad_approvals', allowed: rules.APPROVALS } };
+    }
+    settings.approvals = rules.normalizeApprovals(wanted);
+    save();
+    return { body: { approvals: settings.approvals } };
   },
 
   'POST /mode': async ({ gate }) => {
@@ -626,9 +735,14 @@ const routes = {
     }
   }),
 
-  'POST /pending/decide': async ({ id, action }) => {
+  'POST /pending/decide': async ({ id, action, always, by }) => {
     if (action === 'approve') requireReady();
-    return decidePending({ id, action });
+    return decidePending({
+      id,
+      action,
+      always: Boolean(always),
+      by: by === 'agent' ? 'agent' : 'owner'
+    });
   },
 
   'GET /request': async ({ id }) => {

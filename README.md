@@ -21,6 +21,7 @@ terminal, and after that the agent talks to people through the command line.
 ```bash
 herald mode list   # the default: only people you listed, each with its own setting
 herald mode ask    # anyone in your contacts, and every message waits for you
+                   # (except people you have set to auto)
 ```
 
 `list` is for setting somebody up once and forgetting about it — your father on
@@ -43,7 +44,7 @@ are what make that survivable:
 |                                        |                                                                                                                             |
 | -------------------------------------- | --------------------------------------------------------------------------------------------------------------------------- |
 | **Allow-list**                         | Nobody is reachable until you add them. An empty list means nothing can be sent, to anybody.                                |
-| **A mode per person**                  | `auto` goes out immediately. `ask` waits for you to approve it. A contact added without a flag is `ask`.                    |
+| **A mode per person**                  | `auto` goes out immediately, under either global mode. `ask` waits for you to approve it. A contact added without a flag is `ask`. |
 | **Never groups**                       | Whatever the mode says.                                                                                                     |
 | **Rate limit**                         | 12 messages per hour per person, `auto` included, so a loop in the agent cannot become forty messages to somebody's father. |
 | **Reading is scoped to the same list** | Messages from anyone else are dropped before they are stored. The rest of your WhatsApp never passes through Herald.        |
@@ -124,6 +125,23 @@ herald pending
 herald approve a1b2c3d4
 herald reject a1b2c3d4
 ```
+
+### Where you answer
+
+By default the queue is answered in your terminal, and the agent has no way to
+reach it — two separate programs, which is what makes the queue a gate at all.
+
+```bash
+herald approvals chat    # answer inside the conversation with the agent instead
+herald approvals mac     # back to the terminal (the default)
+herald approvals both    # whichever you reach first
+```
+
+With `chat`, the agent shows you the message and offers three answers — reject,
+send it, or send it and stop asking about that contact — and relays what you
+picked. The guard is then the agent showing you the real text, so this is
+opt-in, and every approval taken this way is marked as agent-relayed in
+`herald log`.
 
 `herald log` shows everything Herald has done — sent, queued, refused, received.
 

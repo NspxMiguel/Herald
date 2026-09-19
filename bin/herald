@@ -110,6 +110,10 @@ function explain(body, status) {
     too_long: `The message is longer than ${body.limit} characters.`,
     rate_limited: `Too many messages to that person in the last hour. Try again in ${Math.ceil((body.retryAfterMs || 0) / 60000)} min.`,
     unknown_request: 'No request is waiting with that id. Run: herald pending',
+    bad_approvals: `Where you answer is one of: ${(body.allowed || []).join(', ')}`,
+    approval_not_delegated:
+      'The agent tried to decide a waiting message, and you have not given it that channel.\n' +
+      'You decide here: herald approve ID  — or hand it the chat: herald approvals chat',
     no_target: 'Say who it goes to: herald send "Name" "message"'
   };
   return messages[body.error] || `Herald refused (${status}): ${body.message || body.error}`;
@@ -142,6 +146,7 @@ const usage = `herald — send WhatsApp messages through Miguel's account, withi
                                        contacts, and asks you every time
     herald mode list                   back to the list only (the default)
     herald identity "IA do Miguel"     how it signs off to the other person
+    herald approvals mac|chat|both     where you answer what is waiting
     herald allow NAME [--auto|--ask]   let the agent write to somebody
     herald deny NAME                   take them off the list
     herald pending                     what the agent wants to send
@@ -326,6 +331,13 @@ async function main() {
         `whatsapp : ${words[status.connection] || status.connection}\n` +
           `mode     : ${status.gate === 'ask' ? 'ask — every message waits for you' : 'list — only the list'}\n` +
           `signs as : — ${status.identity}\n` +
+          `approvals: ${
+            {
+              mac: 'mac — the notification and this terminal',
+              chat: 'chat — you answer inside the conversation with the agent',
+              both: 'both — terminal or chat, whichever you reach first'
+            }[status.approvals] || status.approvals
+          }\n` +
           `contacts : ${status.contacts}\n` +
           `pending  : ${status.pending}\n` +
           `unread   : ${status.unread}\n` +
@@ -362,7 +374,7 @@ async function main() {
       const result = await call('POST', '/mode', { gate: wanted });
       return console.log(
         result.gate === 'ask'
-          ? 'ask  — the agent may now reach anyone in your contacts, and you approve every message'
+          ? 'ask  — the agent may now reach anyone in your contacts, and you approve every\n       message except to people you have already set to auto'
           : 'list — back to the list, with a mode per contact'
       );
     }
@@ -395,6 +407,28 @@ async function main() {
         console.log(`  herald approve ${item.id}   herald reject ${item.id}\n`);
       }
       return;
+    }
+
+    case 'approvals': {
+      const wanted = options._[0];
+      if (!wanted) {
+        const current = await call('GET', '/approvals');
+        console.log(
+          `You answer what is waiting on: ${current.approvals}\n` +
+            `Change it with: herald approvals ${current.allowed.join(' | ')}\n`
+        );
+        return;
+      }
+      const result = await call('POST', '/approvals', { approvals: wanted });
+      const said = {
+        mac: 'Waiting messages are decided here, in your terminal.\nThe agent has no way to approve them.',
+        chat:
+          'Waiting messages are decided in the conversation with the agent.\n' +
+          'It shows you the text and relays your answer — so the guard is now the agent\n' +
+          'showing you the real message. Every approval taken this way says so in herald log.',
+        both: 'Either the terminal or the chat decides — whichever you reach first.'
+      }[result.approvals];
+      return console.log(said);
     }
 
     case 'approve':
