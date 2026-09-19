@@ -236,12 +236,14 @@ sent to Pai</pre>
 sent to Dad</pre>
 
       <p data-lang="pt">
-        Não tem janela. Você liga o WhatsApp uma vez, lendo um QR code desenhado no seu próprio
-        terminal, e daí em diante o agente fala com as pessoas pela linha de comando.
+        Não tem janela. Você liga o WhatsApp uma vez, lendo um QR code que o próprio
+        <code>herald login</code> abre na sua tela, e daí em diante o agente fala com as pessoas
+        pela linha de comando.
       </p>
       <p data-lang="en">
-        There is no window. You link WhatsApp once, by scanning a QR code drawn in your terminal,
-        and after that the agent talks to people through the command line.
+        There is no window. You link WhatsApp once, by scanning a QR code that
+        <code>herald login</code> opens on your screen, and after that the agent talks to people
+        through the command line.
       </p>
 
       <img class="shot" src="assets/terminal.webp" alt="Herald no terminal" />
@@ -344,15 +346,39 @@ sent to Dad</pre>
         </tr>
       </table>
 
+      <h2 data-lang="pt">Duas assinaturas</h2>
+      <h2 data-lang="en">Two signatures</h2>
+
       <p data-lang="pt">
-        Toda mensagem que o agente manda termina com dois caracteres invisíveis (U+3164). Eles não
-        desenham nada, o Unicode os trata como letras — então cortar espaço nunca os come — e são o
-        que separa a sua escrita da escrita do agente, dentro da conversa, meses depois.
+        Toda mensagem que o agente manda termina com uma linha <strong>visível</strong> dizendo que
+        quem escreveu foi um assistente. Quem responde uma pergunta sobre servidor às onze da noite
+        merece saber com o que está falando. Você escolhe o texto — não se ele aparece:
       </p>
       <p data-lang="en">
-        Every message the agent sends ends with two invisible characters (U+3164). They render as
-        nothing, Unicode treats them as letters so trimming never eats them, and they are what tells
-        your own writing apart from the agent's — in the thread itself, months later.
+        Every message the agent sends ends with a <strong>visible</strong> line saying it was
+        written by an assistant. Somebody answering a question about a server at eleven at night
+        deserves to know what they are talking to. You choose the wording — not whether it appears:
+      </p>
+
+      <pre data-lang="pt"><i>$</i> <b>herald identity "IA do Miguel"</b>
+
+consegue abrir a porta 8793 na VPS?
+<i>— IA do Miguel</i></pre>
+      <pre data-lang="en"><i>$</i> <b>herald identity "Miguel's AI"</b>
+
+can you open TCP 8793 on the VPS?
+<i>— Miguel's AI</i></pre>
+
+      <p data-lang="pt">
+        E com dois caracteres <strong>invisíveis</strong> (U+3164). Eles não desenham nada, o
+        Unicode os trata como letras — então cortar espaço nunca os come — e são o que separa a sua
+        escrita da escrita do agente numa conversa em que as duas chegam pelo mesmo número, meses
+        depois.
+      </p>
+      <p data-lang="en">
+        And with two <strong>invisible</strong> characters (U+3164). They render as nothing, Unicode
+        treats them as letters so trimming never eats them, and they are what tells your own writing
+        apart from the agent's in a thread where both arrive from the same number, months later.
       </p>
 
       <h2 data-lang="pt">Começar</h2>
@@ -360,11 +386,11 @@ sent to Dad</pre>
 
       <pre data-lang="pt"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
 <i>$</i> <b>cd Herald && bun install</b>
-<i>$</i> <b>herald login</b>            <i># desenha o QR aqui</i>
+<i>$</i> <b>herald login</b>            <i># abre o QR como imagem</i>
 <i>$</i> <b>herald allow "Pai" --auto</b>   <i># ou: herald mode ask</i></pre>
       <pre data-lang="en"><i>$</i> <b>git clone https://github.com/NspxMiguel/Herald.git</b>
 <i>$</i> <b>cd Herald && bun install</b>
-<i>$</i> <b>herald login</b>            <i># draws the QR here</i>
+<i>$</i> <b>herald login</b>            <i># opens the QR as a picture</i>
 <i>$</i> <b>herald allow "Dad" --auto</b>   <i># or: herald mode ask</i></pre>
 
       <p data-lang="pt">
