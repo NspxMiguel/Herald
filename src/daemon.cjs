@@ -875,7 +875,9 @@ async function shutdown(code = 0) {
   } catch {
     /* it may already be gone */
   }
-  process.exit(code);
+  // Anything that is not a number here means a caller passed something else — a signal name
+  // is the one that happened. Exiting non-zero is closer to the truth than throwing.
+  process.exit(typeof code === 'number' ? code : 0);
 }
 
 /* -------------------------------------------------------------------- start */
@@ -910,8 +912,12 @@ async function main() {
   // waits for `herald login` so nothing spins up a browser for nothing.
   if (fs.existsSync(path.join(home(), 'whatsapp', 'session-herald'))) startSession();
 
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  // Not `process.on('SIGTERM', shutdown)`: a signal handler is called with the signal NAME,
+  // which became the exit code and made process.exit('SIGTERM') throw. The daemon then died
+  // half way through shutting down, still holding port 8799, and the next start refused with
+  // "Port 8799 is taken — Herald may already be running". Measured on 2026-09-20.
+  process.on('SIGTERM', () => shutdown());
+  process.on('SIGINT', () => shutdown());
   process.on('unhandledRejection', (reason) => console.error('unhandled:', reason));
 }
 
