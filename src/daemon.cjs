@@ -463,11 +463,21 @@ async function linkLid(message) {
   try {
     const who = await message.getContact();
     const number = who?.number || who?.id?.user || '';
-    if (!number) return null;
+    // Both of the declines below used to be silent, and that is why an incoming message from
+    // somebody who IS on the list looked identical in the log to one from a stranger: the only
+    // line printed was "no contact on the list matches". Saying which step gave up, and with
+    // what, is the difference between a five-minute answer and an afternoon.
+    if (!number) {
+      console.log(`herald: ${message.from} — WhatsApp returned no number for it, cannot link`);
+      return null;
+    }
     // Matched against the unlinked ones only: a listed contact that already has
     // its @lid must not have it quietly replaced by another one.
     const contact = contactId.findContact(unlinked, number);
-    if (!contact) return null;
+    if (!contact) {
+      console.log(`herald: ${message.from} resolves to ${number}, which is nobody on the list`);
+      return null;
+    }
     contact.lid = message.from;
     save();
     console.log(`herald: ${contact.name} also answers as ${message.from} — linked`);
